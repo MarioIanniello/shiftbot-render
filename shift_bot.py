@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni su Telegram
-Versione: 3.4
-- Stato turni: open/closed
-- /cerca mostra solo turni open
-- Pulsante "✅ Segna scambiato" (autore o admin)
-- /miei: elenca i tuoi turni open con bottone per chiusura
+Versione: 3.5
+- NEW: /cerca in gruppo → risponde in privato (DM) con calendario/risultati.
+  * Se l'utente non ha mai aperto il DM col bot, mostra un deep-link "Apri chat privata".
+- Stato turni: open/closed (+ chiusura via bottone)
+- /miei: elenca i tuoi turni open
 - Contact fix: bottone se @handle, altrimenti menzione tg://user?id=...
 """
 
@@ -18,12 +18,13 @@ from typing import Optional, Tuple
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from telegram.constants import ChatType
+from telegram.error import Forbidden
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ContextTypes, filters, CallbackQueryHandler, ChatMemberHandler
 )
 
-VERSION = "ShiftBot 3.4"
+VERSION = "ShiftBot 3.5"
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
@@ -32,8 +33,8 @@ WELCOME_TEXT = (
     "Per caricare i turni:\n"
     "• Invia l’immagine del turno con una breve descrizione (es. data, note)\n\n"
     "Per cercare i turni:\n"
-    "• `/cerca` → apre il calendario interattivo\n"
-    "• `/date` → elenco date presenti\n"
+    "• `/cerca` → apre il calendario (in privato)\n"
+    "• `/date` → elenco date con turni aperti\n"
     "• `/miei` → i tuoi turni aperti (chiudili da lì)\n"
     "• `/version` → versione del bot\n"
 )
@@ -53,14 +54,15 @@ def ensure_db():
             chat_id INTEGER NOT NULL,
             message_id INTEGER NOT NULL,
             user_id INTEGER,
-            username TEXT,
-            date_iso TEXT NOT NULL,
+            username TEXT,                 -- @handle oppure display name
+            date_iso TEXT NOT NULL,        -- YYYY-MM-DD
             caption TEXT,
             photo_file_id TEXT,
-            status TEXT DEFAULT 'open',
+            status TEXT DEFAULT 'open',    -- 'open' | 'closed'
             created_at TEXT DEFAULT (datetime('now'))
         );
     """)
+    # migrazione: aggiungi colonna status se manca
     cur.execute("PRAGMA table_info(shifts);")
     cols = [r[1] for r in cur.fetchall()]
     if "status" not in cols:
@@ -84,7 +86,7 @@ def parse_date(text: str) -> Optional[str]:
                 continue
     return None
 
-# ============== CONTATTO ==============
+# ============== CONTATTO: bottone o menzione ==============
 def contact_payload(user_id: Optional[int], username: Optional[str]) -> Tuple[str, Optional[InlineKeyboardMarkup], str]:
     if username and isinstance(username, str) and username.startswith("@") and len(username) > 1:
         handle = username[1:]
@@ -108,8 +110,49 @@ async def is_user_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE, user_id:
     except Exception:
         return False
 
-# ============== HANDLERS ==============
+# ============== HANDLERS BASE ==============
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /start in privato:
+    - senza parametri → benvenuto
+    - con deep-link: /start search        → calendario
+                      /start search-YYYY-MM-DD → risultati di quella data
+    """
+    # deep-link payload (args dopo /start)
+    payload = None
+    if update.message and update.message.text:
+        parts = update.message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            payload = parts[1].strip()
+
+    if update.effective_chat.type in (ChatType.PRIVATE,):
+        if payload:
+            if payload.startswith("search"):
+                # se ha la data: search-YYYY-MM-DD
+                date_iso = None
+                if "-" in payload:
+                    try:
+                        maybe = payload.split("search-", 1)[1]
+                        # accettiamo solo formato ISO, es. 2025-10-12
+                        datetime.strptime(maybe, "%Y-%m-%d")
+                        date_iso = maybe
+                    except Exception:
+                        date_iso = None
+                if date_iso:
+                    # mostra risultati in privato
+                    fake_update = update  # possiamo riusare update
+                    await show_shifts(fake_update, ctx, date_iso)
+                else:
+                    # mostra calendario in privato
+                    kb = build_calendar(datetime.today(), mode="SEARCH")
+                    await update.effective_message.reply_text("📅 Seleziona la data che vuoi consultare:", reply_markup=kb)
+                return
+
+        # nessun payload specifico → benvenuto
+        await update.effective_message.reply_text(WELCOME_TEXT, parse_mode="Markdown")
+        return
+
+    # se qualcuno usa /start nel gruppo, mandiamo il benvenuto lì
     await update.effective_message.reply_text(WELCOME_TEXT, parse_mode="Markdown")
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -129,6 +172,7 @@ async def welcome_new_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chm.old_chat_member.status in ("left", "kicked") and chm.new_chat_member.status == "member":
         await ctx.bot.send_message(chat_id=chm.chat.id, text=WELCOME_TEXT, parse_mode="Markdown")
 
+# ============== FOTO/DOC ==============
 async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if update.effective_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
@@ -178,21 +222,98 @@ async def save_shift(msg: Message, date_iso: str) -> int:
     conn.close()
     return new_id
 
+# ============== CERCA (DM-first) ==============
 async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /cerca:
+    - In gruppo/supergruppo → prova a rispondere in PRIVATO (DM).
+      Se l'utente non ha mai avviato il DM → mostra bottone deep-link per aprire il DM.
+    - In privato → comportamento normale (calendario o ricerca diretta).
+    """
+    chat = update.effective_chat
+    user = update.effective_user
     args = ctx.args
-    if not args:
+    bot_username = ctx.bot.username or "this_bot"
+
+    # Parsing data opzionale
+    date_iso = None
+    if args:
+        query_date = " ".join(args)
+        date_iso = parse_date(query_date)
+
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        # tenta DM
+        try:
+            if date_iso:
+                # invia risultati in DM
+                await ctx.bot.send_message(chat_id=user.id, text="🔍 Sto cercando i turni…")
+                # costruiamo un finto update per riusare show_shifts
+                fake_update = Update(update.update_id, message=update.effective_message)
+                # ma mostriamo in DM: quindi usiamo un messaggio DM d'appoggio
+                await show_shifts_dm(ctx, user.id, date_iso)
+                await update.effective_message.reply_text("📬 Ti ho scritto in privato con i risultati.")
+            else:
+                kb = build_calendar(datetime.today(), mode="SEARCH")
+                await ctx.bot.send_message(chat_id=user.id, text="📅 Seleziona la data che vuoi consultare:", reply_markup=kb)
+                await update.effective_message.reply_text("📬 Ti ho scritto in privato con il calendario.")
+            return
+        except Forbidden:
+            # l'utente non ha mai aperto il DM col bot → deep-link
+            payload = f"search-{date_iso}" if date_iso else "search"
+            url = f"https://t.me/{bot_username}?start={payload}"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata", url=url)]])
+            await update.effective_message.reply_text(
+                "Per motivi di privacy, apri la chat privata con il bot e ti mostrerò il calendario/risultati lì:",
+                reply_markup=kb
+            )
+            return
+
+    # In privato:
+    if date_iso:
+        await show_shifts(update, ctx, date_iso)
+    else:
         kb = build_calendar(datetime.today(), mode="SEARCH")
         await update.effective_message.reply_text("📅 Seleziona la data che vuoi consultare:", reply_markup=kb)
+
+async def show_shifts_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, date_iso: str):
+    """Mostra i risultati di una data direttamente nel DM (senza usare update.chat)."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""SELECT id, chat_id, message_id, user_id, username, caption
+                   FROM shifts
+                   WHERE date_iso=? AND status='open'
+                   ORDER BY created_at ASC""", (date_iso,))
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        await ctx.bot.send_message(chat_id=user_id, text="Nessun turno salvato per quella data.")
         return
 
-    query_date = " ".join(args)
-    date_iso = parse_date(query_date)
-    if not date_iso:
-        await update.effective_message.reply_text("Formato data non valido. Usa `/cerca` per aprire il calendario.", parse_mode="Markdown")
-        return
+    human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+    await ctx.bot.send_message(chat_id=user_id, text=f"📅 Turni trovati per *{human}*: {len(rows)}", parse_mode="Markdown")
 
-    await show_shifts(update, ctx, date_iso)
+    for (sid, chat_id, message_id, owner_id, username, caption) in rows:
+        try:
+            await ctx.bot.copy_message(
+                chat_id=user_id,
+                from_chat_id=chat_id,
+                message_id=message_id
+            )
+        except Exception:
+            pass
 
+        # contatto autore
+        txt, kb, pm = contact_payload(owner_id, username)
+        if caption and kb is None and pm == "HTML":
+            await ctx.bot.send_message(chat_id=user_id, text=f"{caption}\n{txt}", parse_mode=pm)
+        else:
+            await ctx.bot.send_message(chat_id=user_id, text=txt, reply_markup=kb, parse_mode=pm)
+
+        # bottone chiusura: nel DM ha senso solo informativo (non può chiudere da qui se non c'è contesto chat originale),
+        # quindi lo omettiamo nel DM per evitare confusione.
+
+# ============== ALTRI COMANDI ==============
 async def miei_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
@@ -280,7 +401,7 @@ async def dates_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append(f"• {d}: {count}")
     await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-# ============== CALENDARIO ==============
+# ============== CALENDARIO INLINE ==============
 def build_calendar(base_date: datetime, mode="SETDATE", extra="") -> InlineKeyboardMarkup:
     year, month = base_date.year, base_date.month
     first_day = datetime(year, month, 1)
@@ -316,13 +437,14 @@ def build_calendar(base_date: datetime, mode="SETDATE", extra="") -> InlineKeybo
     ])
     return InlineKeyboardMarkup(keyboard)
 
-# ============== CALLBACK ==============
+# ============== CALLBACK INLINE ==============
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     parts = (query.data or "").split("|")
 
     if parts[0] == "SETDATE":
+        # SETDATE|YYYY-MM-DD|chat_id|message_id|user_id
         date_iso = parts[1]
         chat_id = int(parts[2]) if len(parts) > 2 else None
         message_id = int(parts[3]) if len(parts) > 3 else None
@@ -406,7 +528,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("version", version_cmd))
-    app.add_handler(CommandHandler("testbtn", testbtn_cmd))
+    app.add_handler(CommandHandler("testbtn", testbtn_cmd))  # test rapido opzionale
     app.add_handler(CommandHandler("cerca", search_cmd))
     app.add_handler(CommandHandler("date", dates_cmd))
     app.add_handler(CommandHandler("miei", miei_cmd))
