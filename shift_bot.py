@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ShiftBot – Gestione cambi turni su Telegram
+Versione: 3.3
+- Benvenuto automatico ai nuovi membri
+- Calendario per inserimento e ricerca (/cerca)
+- Supporto foto e documenti immagine
+- "Contatta autore": bottone se l'autore ha un vero @handle,
+  altrimenti menzione HTML tg://user?id=<id>
+- /cerca: eliminato messaggio duplicato "Risultati mostrati..."
+"""
+
+import os
+import re
+import sqlite3
+from datetime import datetime, timedelta
+from typing import Optional
+
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Message
+from telegram.constants import ChatType
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    ContextTypes, filters, CallbackQueryHandler, ChatMemberHandler
+)
+
+VERSION = "ShiftBot 3.3"
+DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+
+WELCOME_TEXT = (
+    "👋 Benvenuto/a nel gruppo *Cambi Servizi*!\n\n"
+    "Per caricare i turni:\n"
+    "• Invia l’immagine del turno con una breve descrizione (es. data, note)\n\n"
+    "Per cercare i turni:\n"
+    "• `/cerca` → apre il calendario interattivo\n"
+    "• `/date` → elenco date presenti\n"
+    "• `/version` → versione del bot\n"
+)
+
+DATE_PATTERNS = [
+    r'(?P<d>\d{1,2})[\/\-\.\s](?P<m>\d{1,2})[\/\-\.\s](?P<y>\d{4})',
+    r'(?P<y>\d{4})[\/\-\.\s](?P<m>\d{1,2})[\/\-\.\s](?P<d>\d{1,2})',
+]
+
+# ============== DB ==============
+def ensure_db():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS shifts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            user_id INTEGER,
+            username TEXT,                 -- @handle oppure display name
+            date_iso TEXT NOT NULL,        -- YYYY-MM-DD
+            caption TEXT,
+            photo_file_id TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+def parse_date(text: str) -> Optional[str]:
+    if not text:
+        return None
+    for pat in DATE_PATTERNS:
+        m = re.search(pat, text)
+        if m:
+            try:
+                d = int(m.group('d')); mth = int(m.group('m')); y = int(m.group('y'))
+                return datetime(y, mth, d).strftime('%Y-%m-%d')
+            except Exception:
+                continue
+    return None
+
+# ============== CONTATTO: bottone o menzione ==============
+def contact_payload(user_id: Optional[int], username: Optional[str]):
+    """
+    Ritorna (text, keyboard, parse_mode).
+    - Se esiste un vero @username (stringa che inizia con '@') → bottone https://t.me/<handle>
+    - Altrimenti → menzione HTML tg://user?id=<user_id> (senza keyboard)
+    """
+    if username and isinstance(username, str) and username.startswith("@") and len(username) > 1:
+        handle = username[1:]
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📩 Contatta autore", url=f"https://t.me/{handle}")]])
+        return ("📩 Contatta l’autore del turno:", kb, "Markdown")
+    else:
+        if user_id:
+            link = f'<a href="tg://user?id={user_id}">📩 Contatta autore</a>'
+            return (link, None, "HTML")
+        else:
+            return ("📩 Contatta autore", None, "Markdown")
+
+# ============== HANDLERS ==============
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(WELCOME_TEXT, parse_mode="Markdown")
+
+async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await start(update, ctx)
+
+async def version_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(VERSION)
+
+async def testbtn_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Comando di test locale per vedere il comportamento contatto con il tuo utente."""
+    u = update.effective_user
+    username = f"@{u.username}" if (u and u.username) else None
+    txt, kb, pm = contact_payload(u.id if u else None, username)
+    await update.effective_message.reply_text(txt, reply_markup=kb, parse_mode=pm)
+
+async def welcome_new_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chm = update.chat_member
+    if chm.old_chat_member.status in ("left", "kicked") and chm.new_chat_member.status == "member":
+        await ctx.bot.send_message(chat_id=chm.chat.id, text=WELCOME_TEXT, parse_mode="Markdown")
+
+async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Gestisce foto e documenti immagine; se manca data, mostra calendario."""
+    msg = update.effective_message
+    if update.effective_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+
+    caption = (msg.caption or "").strip()
+    date_iso = parse_date(caption)
+
+    if not date_iso:
+        extra = f"{msg.chat.id}|{msg.message_id}|{msg.from_user.id if msg.from_user else 0}"
+        kb = build_calendar(datetime.today(), mode="SETDATE", extra=extra)
+        await msg.reply_text("📅 Seleziona la data per questo turno:", reply_markup=kb)
+        return
+
+    await save_shift(msg, date_iso)
+
+    # conferma + contatto autore
+    human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+    await update.effective_message.reply_text(f"✅ Turno registrato per il {human}")
+
+    u = msg.from_user
+    username = f"@{u.username}" if (u and u.username) else None
+    txt, kb, pm = contact_payload(u.id if u else None, username)
+    await ctx.bot.send_message(chat_id=msg.chat.id, text=txt, reply_markup=kb, parse_mode=pm)
+
+async def save_shift(msg: Message, date_iso: str):
+    username = ""
+    if msg.from_user:
+        username = f"@{msg.from_user.username}" if msg.from_user.username else msg.from_user.full_name
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO shifts(chat_id, message_id, user_id, username, date_iso, caption, photo_file_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (msg.chat.id, msg.message_id,
+         msg.from_user.id if msg.from_user else None,
+         username, date_iso, msg.caption or "", None)
+    )
+    conn.commit()
+    conn.close()
+
+async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    args = ctx.args
+    if not args:
+        kb = build_calendar(datetime.today(), mode="SEARCH")
+        await update.effective_message.reply_text("📅 Seleziona la data che vuoi consultare:", reply_markup=kb)
+        return
+
+    query_date = " ".join(args)
+    date_iso = parse_date(query_date)
+    if not date_iso:
+        await update.effective_message.reply_text("Formato data non valido. Usa `/cerca` per aprire il calendario.", parse_mode="Markdown")
+        return
+
+    await show_shifts(update, ctx, date_iso)
+
+async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: str):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""SELECT chat_id, message_id, user_id, username, caption
+                   FROM shifts
+                   WHERE date_iso=? ORDER BY created_at ASC""", (date_iso,))
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        await update.effective_message.reply_text("Nessun turno salvato per quella data.")
+        return
+
+    # Mostra solo il riepilogo con conteggio (niente "Risultati mostrati..." duplicato)
+    human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+    await update.effective_message.reply_text(f"📅 Turni trovati per *{human}*: {len(rows)}", parse_mode="Markdown")
+
+    for (chat_id, message_id, user_id, username, caption) in rows:
+        try:
+            await ctx.bot.copy_message(
+                chat_id=update.effective_chat.id,
+                from_chat_id=chat_id,
+                message_id=message_id
+            )
+        except Exception:
+            pass  # anche se la copia fallisce, invieremo il contatto sotto
+
+        # messaggio con bottone/menzione subito dopo
+        txt, kb, pm = contact_payload(user_id, username)
+        if caption and kb is None and pm == "HTML":
+            await update.effective_message.reply_text(f"{caption}\n{txt}", parse_mode=pm)
+        else:
+            await update.effective_message.reply_text(txt, reply_markup=kb, parse_mode=pm)
+
+async def dates_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Mostra l’elenco delle date con turni salvati."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""SELECT date_iso, COUNT(*) FROM shifts
+                   GROUP BY date_iso ORDER BY date_iso ASC""")
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        await update.effective_message.reply_text("Non ci sono turni salvati al momento.")
+        return
+
+    lines = ["📆 *Date con turni caricati:*", ""]
+    for date_iso, count in rows:
+        d = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+        lines.append(f"• {d}: {count}")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+# ============== CALENDARIO INLINE ==============
+def build_calendar(base_date: datetime, mode="SETDATE", extra="") -> InlineKeyboardMarkup:
+    year, month = base_date.year, base_date.month
+    first_day = datetime(year, month, 1)
+    next_month = (first_day.replace(day=28) + timedelta(days=4)).replace(day=1)
+    prev_month = (first_day - timedelta(days=1)).replace(day=1)
+
+    keyboard = []
+    keyboard.append([InlineKeyboardButton(f"{month:02d}/{year}", callback_data="IGNORE")])
+    keyboard.append([InlineKeyboardButton(d, callback_data="IGNORE") for d in ["L","M","M","G","V","S","D"]])
+
+    week = []
+    for _ in range(first_day.weekday()):
+        week.append(InlineKeyboardButton(" ", callback_data="IGNORE"))
+
+    day = first_day
+    while day.month == month:
+        cb = f"{mode}|{day.strftime('%Y-%m-%d')}"
+        if extra:
+            cb += "|" + extra
+        week.append(InlineKeyboardButton(str(day.day), callback_data=cb))
+        if len(week) == 7:
+            keyboard.append(week); week = []
+        day += timedelta(days=1)
+
+    if week:
+        while len(week) < 7:
+            week.append(InlineKeyboardButton(" ", callback_data="IGNORE"))
+        keyboard.append(week)
+
+    keyboard.append([
+        InlineKeyboardButton("<", callback_data=f"NAV|{mode}|{prev_month.strftime('%Y-%m-%d')}|{extra}"),
+        InlineKeyboardButton(">", callback_data=f"NAV|{mode}|{next_month.strftime('%Y-%m-%d')}|{extra}")
+    ])
+    return InlineKeyboardMarkup(keyboard)
+
+async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = (query.data or "").split("|")
+
+    if parts[0] == "SETDATE":
+        # SETDATE|YYYY-MM-DD|chat_id|message_id|user_id
+        date_iso = parts[1]
+        chat_id = int(parts[2]) if len(parts) > 2 else None
+        message_id = int(parts[3]) if len(parts) > 3 else None
+        user_id = int(parts[4]) if len(parts) > 4 else None
+
+        # oggetto-minimo per riusare save_shift
+        fake = type("obj", (), {})()
+        fake.chat = type("c", (), {"id": chat_id})
+        fake.message_id = message_id
+        fake.caption = ""
+        fake.photo = None
+        fake.from_user = type("u", (), {"id": user_id, "username": None, "full_name": "Utente"})
+
+        await save_shift(fake, date_iso)
+
+        human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+        await query.edit_message_text(f"✅ Turno registrato per il {human}")
+
+        txt, kb, pm = contact_payload(user_id, None)
+        await ctx.bot.send_message(chat_id=update.effective_chat.id, text=txt, reply_markup=kb, parse_mode=pm)
+
+    elif parts[0] == "SEARCH":
+        date_iso = parts[1]
+        fake_update = Update(update.update_id, message=query.message)
+        await show_shifts(fake_update, ctx, date_iso)
+        # Manteniamo solo l'edit del calendario per conferma, senza altro messaggio duplicato
+        await query.edit_message_text(f"📅 Risultati mostrati per {datetime.strptime(date_iso, '%Y-%m-%d').strftime('%d/%m/%Y')}")
+
+    elif parts[0] == "NAV":
+        mode = parts[1]
+        new_month = datetime.strptime(parts[2], "%Y-%m-%d")
+        extra = parts[3] if len(parts) > 3 else ""
+        kb = build_calendar(new_month, mode, extra)
+        await query.edit_message_reply_markup(reply_markup=kb)
+
+# ============== MAIN ==============
+def main():
+    if not TOKEN:
+        raise SystemExit("Errore: variabile d'ambiente TELEGRAM_BOT_TOKEN mancante.")
+
+    ensure_db()
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("version", version_cmd))
+    app.add_handler(CommandHandler("testbtn", testbtn_cmd))  # test rapido opzionale
+    app.add_handler(CommandHandler("cerca", search_cmd))
+    app.add_handler(CommandHandler("date", dates_cmd))
+
+    img_doc_filter = filters.Document.IMAGE if hasattr(filters.Document, "IMAGE") else filters.Document.MimeType("image/")
+    app.add_handler(MessageHandler(filters.PHOTO | img_doc_filter, photo_or_doc_image_handler))
+
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
+
+    print("ShiftBot avviato. Premi Ctrl+C per uscire.")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
