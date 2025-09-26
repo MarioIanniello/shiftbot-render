@@ -31,7 +31,7 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 WELCOME_TEXT = (
     "👋 Benvenuto/a nel gruppo *Cambi Servizi*!\n\n"
     "Per caricare i turni:\n"
-    "• Invia l’immagine del turno con una breve descrizione (es. data, note)\n\n"
+    "• Invia l’immagine del turno con una breve descrizione (es. Cambio per mattina, Cambio per interm. , Cambio per pomeriggio)\n\n"
     "Per cercare i turni:\n"
     "• `/cerca` → apre il calendario (in privato)\n"
     "• `/date` → elenco date con turni aperti\n"
