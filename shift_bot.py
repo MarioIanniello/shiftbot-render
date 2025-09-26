@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni su Telegram
-Versione: 3.5
-- NEW: /cerca in gruppo → risponde in privato (DM) con calendario/risultati.
-  * Se l'utente non ha mai aperto il DM col bot, mostra un deep-link "Apri chat privata".
-- Stato turni: open/closed (+ chiusura via bottone)
-- /miei: elenca i tuoi turni open
-- Contact fix: bottone se @handle, altrimenti menzione tg://user?id=...
+Versione: 3.6
+- /cerca risponde in privato (deep-link se necessario)
+- Stato turni open/closed + chiusura
+- NUOVO: "📩 Contatta autore" invia in DM all'autore lo screenshot e la frase:
+         "Ciao, questo turno è ancora disponibile?" con menzione del richiedente.
+         Se l'autore non ha DM aperto col bot → avviso e link profilo autore al richiedente.
 """
 
 import os
@@ -24,7 +24,7 @@ from telegram.ext import (
     ContextTypes, filters, CallbackQueryHandler, ChatMemberHandler
 )
 
-VERSION = "ShiftBot 3.5"
+VERSION = "ShiftBot 3.6"
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
@@ -54,11 +54,11 @@ def ensure_db():
             chat_id INTEGER NOT NULL,
             message_id INTEGER NOT NULL,
             user_id INTEGER,
-            username TEXT,                 -- @handle oppure display name
-            date_iso TEXT NOT NULL,        -- YYYY-MM-DD
+            username TEXT,
+            date_iso TEXT NOT NULL,
             caption TEXT,
             photo_file_id TEXT,
-            status TEXT DEFAULT 'open',    -- 'open' | 'closed'
+            status TEXT DEFAULT 'open',
             created_at TEXT DEFAULT (datetime('now'))
         );
     """)
@@ -86,18 +86,22 @@ def parse_date(text: str) -> Optional[str]:
                 continue
     return None
 
-# ============== CONTATTO: bottone o menzione ==============
-def contact_payload(user_id: Optional[int], username: Optional[str]) -> Tuple[str, Optional[InlineKeyboardMarkup], str]:
+# ============== UTILS CONTATTO ==============
+def mention_html(user_id: Optional[int], username: Optional[str]) -> str:
+    """Ritorna una menzione HTML sicura per il richiedente."""
     if username and isinstance(username, str) and username.startswith("@") and len(username) > 1:
-        handle = username[1:]
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📩 Contatta autore", url=f"https://t.me/{handle}")]])
-        return ("📩 Contatta l’autore del turno:", kb, "Markdown")
-    else:
-        if user_id:
-            link = f'<a href="tg://user?id={user_id}">📩 Contatta autore</a>'
-            return (link, None, "HTML")
-        else:
-            return ("📩 Contatta autore", None, "Markdown")
+        return username
+    if user_id:
+        return f'<a href="tg://user?id={user_id}">utente</a>'
+    return "utente"
+
+def contact_buttons(shift_id: int, owner_username: Optional[str]) -> InlineKeyboardMarkup:
+    """Pulsanti: contatto assistito + (opzionale) apri profilo autore."""
+    row = [InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{shift_id}")]
+    if owner_username and owner_username.startswith("@") and len(owner_username) > 1:
+        handle = owner_username[1:]
+        row.append(InlineKeyboardButton("👤 Profilo autore", url=f"https://t.me/{handle}"))
+    return InlineKeyboardMarkup([row])
 
 def close_button(shift_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Segna scambiato", callback_data=f"CLOSE|{shift_id}")]])
@@ -112,47 +116,34 @@ async def is_user_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE, user_id:
 
 # ============== HANDLERS BASE ==============
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """
-    /start in privato:
-    - senza parametri → benvenuto
-    - con deep-link: /start search        → calendario
-                      /start search-YYYY-MM-DD → risultati di quella data
-    """
-    # deep-link payload (args dopo /start)
+    # deep-link per /start search o /start search-YYYY-MM-DD
     payload = None
     if update.message and update.message.text:
         parts = update.message.text.split(maxsplit=1)
         if len(parts) > 1:
             payload = parts[1].strip()
 
-    if update.effective_chat.type in (ChatType.PRIVATE,):
+    if update.effective_chat.type == ChatType.PRIVATE:
         if payload:
             if payload.startswith("search"):
-                # se ha la data: search-YYYY-MM-DD
                 date_iso = None
                 if "-" in payload:
                     try:
                         maybe = payload.split("search-", 1)[1]
-                        # accettiamo solo formato ISO, es. 2025-10-12
                         datetime.strptime(maybe, "%Y-%m-%d")
                         date_iso = maybe
                     except Exception:
                         date_iso = None
                 if date_iso:
-                    # mostra risultati in privato
-                    fake_update = update  # possiamo riusare update
+                    fake_update = update
                     await show_shifts(fake_update, ctx, date_iso)
                 else:
-                    # mostra calendario in privato
                     kb = build_calendar(datetime.today(), mode="SEARCH")
                     await update.effective_message.reply_text("📅 Seleziona la data che vuoi consultare:", reply_markup=kb)
                 return
-
-        # nessun payload specifico → benvenuto
         await update.effective_message.reply_text(WELCOME_TEXT, parse_mode="Markdown")
         return
 
-    # se qualcuno usa /start nel gruppo, mandiamo il benvenuto lì
     await update.effective_message.reply_text(WELCOME_TEXT, parse_mode="Markdown")
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -162,10 +153,7 @@ async def version_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(VERSION)
 
 async def testbtn_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    u = update.effective_user
-    username = f"@{u.username}" if (u and u.username) else None
-    txt, kb, pm = contact_payload(u.id if u else None, username)
-    await update.effective_message.reply_text(txt, reply_markup=kb, parse_mode=pm)
+    await update.effective_message.reply_text("Test OK")
 
 async def welcome_new_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chm = update.chat_member
@@ -192,15 +180,15 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
     human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
     await update.effective_message.reply_text(f"✅ Turno registrato per il {human}")
 
-    u = msg.from_user
-    username = f"@{u.username}" if (u and u.username) else None
-    txt, kb, pm = contact_payload(u.id if u else None, username)
-    await ctx.bot.send_message(chat_id=msg.chat.id, text=txt, reply_markup=kb, parse_mode=pm)
-
+    # pulsanti sotto al post: contatto + chiusura
+    owner_username = f"@{msg.from_user.username}" if (msg.from_user and msg.from_user.username) else (msg.from_user.full_name if msg.from_user else "")
     await ctx.bot.send_message(
         chat_id=msg.chat.id,
-        text="Quando il cambio è concluso:",
-        reply_markup=close_button(new_id)
+        text="Azioni:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{new_id}"),
+             InlineKeyboardButton("✅ Segna scambiato", callback_data=f"CLOSE|{new_id}")]
+        ])
     )
 
 async def save_shift(msg: Message, date_iso: str) -> int:
@@ -224,32 +212,20 @@ async def save_shift(msg: Message, date_iso: str) -> int:
 
 # ============== CERCA (DM-first) ==============
 async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """
-    /cerca:
-    - In gruppo/supergruppo → prova a rispondere in PRIVATO (DM).
-      Se l'utente non ha mai avviato il DM → mostra bottone deep-link per aprire il DM.
-    - In privato → comportamento normale (calendario o ricerca diretta).
-    """
     chat = update.effective_chat
     user = update.effective_user
     args = ctx.args
     bot_username = ctx.bot.username or "this_bot"
 
-    # Parsing data opzionale
     date_iso = None
     if args:
         query_date = " ".join(args)
         date_iso = parse_date(query_date)
 
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        # tenta DM
         try:
             if date_iso:
-                # invia risultati in DM
                 await ctx.bot.send_message(chat_id=user.id, text="🔍 Sto cercando i turni…")
-                # costruiamo un finto update per riusare show_shifts
-                fake_update = Update(update.update_id, message=update.effective_message)
-                # ma mostriamo in DM: quindi usiamo un messaggio DM d'appoggio
                 await show_shifts_dm(ctx, user.id, date_iso)
                 await update.effective_message.reply_text("📬 Ti ho scritto in privato con i risultati.")
             else:
@@ -258,7 +234,6 @@ async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await update.effective_message.reply_text("📬 Ti ho scritto in privato con il calendario.")
             return
         except Forbidden:
-            # l'utente non ha mai aperto il DM col bot → deep-link
             payload = f"search-{date_iso}" if date_iso else "search"
             url = f"https://t.me/{bot_username}?start={payload}"
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata", url=url)]])
@@ -268,7 +243,7 @@ async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # In privato:
+    # in privato
     if date_iso:
         await show_shifts(update, ctx, date_iso)
     else:
@@ -276,7 +251,6 @@ async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("📅 Seleziona la data che vuoi consultare:", reply_markup=kb)
 
 async def show_shifts_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, date_iso: str):
-    """Mostra i risultati di una data direttamente nel DM (senza usare update.chat)."""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""SELECT id, chat_id, message_id, user_id, username, caption
@@ -295,23 +269,13 @@ async def show_shifts_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, date_iso:
 
     for (sid, chat_id, message_id, owner_id, username, caption) in rows:
         try:
-            await ctx.bot.copy_message(
-                chat_id=user_id,
-                from_chat_id=chat_id,
-                message_id=message_id
-            )
+            await ctx.bot.copy_message(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
         except Exception:
             pass
-
-        # contatto autore
-        txt, kb, pm = contact_payload(owner_id, username)
-        if caption and kb is None and pm == "HTML":
-            await ctx.bot.send_message(chat_id=user_id, text=f"{caption}\n{txt}", parse_mode=pm)
-        else:
-            await ctx.bot.send_message(chat_id=user_id, text=txt, reply_markup=kb, parse_mode=pm)
-
-        # bottone chiusura: nel DM ha senso solo informativo (non può chiudere da qui se non c'è contesto chat originale),
-        # quindi lo omettiamo nel DM per evitare confusione.
+        # pulsanti: contatto assistito + profilo autore (se esiste handle)
+        kb = contact_buttons(sid, username if username and username.startswith("@") else None)
+        info = f"{caption}\n" if caption else ""
+        await ctx.bot.send_message(chat_id=user_id, text=info + "Azioni:", reply_markup=kb)
 
 # ============== ALTRI COMANDI ==============
 async def miei_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -343,8 +307,13 @@ async def miei_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass
-        await update.effective_message.reply_text(f"📅 {human}\n{caption or ''}".strip(),
-                                                  reply_markup=close_button(sid))
+        await update.effective_message.reply_text(
+            f"📅 {human}\n{caption or ''}".strip(),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{sid}"),
+                 InlineKeyboardButton("✅ Segna scambiato", callback_data=f"CLOSE|{sid}")]
+            ])
+        )
 
 async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: str):
     conn = sqlite3.connect(DB_PATH)
@@ -363,7 +332,7 @@ async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: 
     human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
     await update.effective_message.reply_text(f"📅 Turni trovati per *{human}*: {len(rows)}", parse_mode="Markdown")
 
-    for (sid, chat_id, message_id, user_id, username, caption) in rows:
+    for (sid, chat_id, message_id, owner_id, username, caption) in rows:
         try:
             await ctx.bot.copy_message(
                 chat_id=update.effective_chat.id,
@@ -373,14 +342,19 @@ async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: 
         except Exception:
             pass
 
-        txt, kb, pm = contact_payload(user_id, username)
-        if caption and kb is None and pm == "HTML":
-            await update.effective_message.reply_text(f"{caption}\n{txt}", parse_mode=pm)
-        else:
-            await update.effective_message.reply_text(txt, reply_markup=kb, parse_mode=pm)
+        # pulsanti contatto assistito + profilo + chiudi
+        btns = [
+            InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{sid}"),
+            InlineKeyboardButton("✅ Segna scambiato", callback_data=f"CLOSE|{sid}")
+        ]
+        if username and isinstance(username, str) and username.startswith("@") and len(username) > 1:
+            handle = username[1:]
+            btns.insert(1, InlineKeyboardButton("👤 Profilo autore", url=f"https://t.me/{handle}"))
 
-        await update.effective_message.reply_text("Segna come scambiato quando chiuso:",
-                                                  reply_markup=close_button(sid))
+        txt = (caption or "").strip()
+        if txt:
+            await update.effective_message.reply_text(txt)
+        await update.effective_message.reply_text("Azioni:", reply_markup=InlineKeyboardMarkup([btns]))
 
 async def dates_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH)
@@ -444,7 +418,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     parts = (query.data or "").split("|")
 
     if parts[0] == "SETDATE":
-        # SETDATE|YYYY-MM-DD|chat_id|message_id|user_id
         date_iso = parts[1]
         chat_id = int(parts[2]) if len(parts) > 2 else None
         message_id = int(parts[3]) if len(parts) > 3 else None
@@ -462,11 +435,14 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         await query.edit_message_text(f"✅ Turno registrato per il {human}")
 
-        txt, kb, pm = contact_payload(user_id, None)
-        await ctx.bot.send_message(chat_id=update.effective_chat.id, text=txt, reply_markup=kb, parse_mode=pm)
-        await ctx.bot.send_message(chat_id=update.effective_chat.id,
-                                   text="Quando il cambio è concluso:",
-                                   reply_markup=close_button(new_id))
+        await ctx.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Azioni:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{new_id}"),
+                 InlineKeyboardButton("✅ Segna scambiato", callback_data=f"CLOSE|{new_id}")]
+            ])
+        )
 
     elif parts[0] == "SEARCH":
         date_iso = parts[1]
@@ -482,6 +458,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=kb)
 
     elif parts[0] == "CLOSE":
+        # chiusura turno
         try:
             shift_id = int(parts[1])
         except Exception:
@@ -517,6 +494,64 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         await query.edit_message_text(f"✅ Turno segnato come *scambiato* ({human}).", parse_mode="Markdown")
 
+    elif parts[0] == "CONTACT":
+        # contatto assistito: inoltra al proprietario il post + messaggio standard
+        try:
+            shift_id = int(parts[1])
+        except Exception:
+            await query.answer("ID turno non valido.", show_alert=True)
+            return
+
+        # prendi dati turno
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""SELECT chat_id, message_id, user_id, username, date_iso
+                       FROM shifts WHERE id=?""", (shift_id,))
+        row = cur.fetchone()
+        conn.close()
+
+        if not row:
+            await query.answer("Turno non trovato.", show_alert=True)
+            return
+
+        src_chat_id, src_msg_id, owner_id, owner_username, date_iso = row
+        requester = update.effective_user
+        requester_name = mention_html(requester.id if requester else None,
+                                      f"@{requester.username}" if requester and requester.username else None)
+
+        # prova invio DM all'autore
+        try:
+            # 1) copia lo screenshot/originale
+            await ctx.bot.copy_message(chat_id=owner_id, from_chat_id=src_chat_id, message_id=src_msg_id)
+            # 2) invia il testo con menzione del richiedente + domanda
+            human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y") if date_iso else ""
+            text = f"{requester_name} ti ha scritto riguardo al tuo turno del *{human}*.\n\n" \
+                   f"**Ciao, questo turno è ancora disponibile?**"
+            # invia in Markdown+HTML safe: meglio HTML per la menzione tg://user
+            text_html = f'{mention_html(requester.id if requester else None, f"@{requester.username}" if requester and requester.username else None)} ' \
+                        f'ti ha contattato per il tuo turno del <b>{human}</b>.\n\n' \
+                        f'<b>Ciao, questo turno è ancora disponibile?</b>'
+            await ctx.bot.send_message(chat_id=owner_id, text=text_html, parse_mode="HTML")
+            await query.answer("Richiesta inviata all'autore in privato ✅", show_alert=False)
+        except Forbidden:
+            # autore non ha DM aperto col bot → avvisa richiedente e offri link profilo autore
+            btns = None
+            if owner_username and isinstance(owner_username, str) and owner_username.startswith("@"):
+                handle = owner_username[1:]
+                btns = InlineKeyboardMarkup([[InlineKeyboardButton("👤 Apri profilo autore", url=f"https://t.me/{handle}")]])
+            await query.message.reply_text(
+                "⚠️ Non posso scrivere all’autore in privato perché non ha avviato il bot.\n"
+                "Contattalo direttamente dal profilo:",
+                reply_markup=btns
+            )
+        except Exception:
+            await query.answer("Impossibile inviare il messaggio all’autore.", show_alert=True)
+        else:
+            # conferma al richiedente (nel gruppo o DM)
+            await query.message.reply_text("📬 Ho scritto all’autore in privato. Attendi la risposta.")
+            # fine CONTACT
+            return
+
 # ============== MAIN ==============
 def main():
     if not TOKEN:
@@ -528,7 +563,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("version", version_cmd))
-    app.add_handler(CommandHandler("testbtn", testbtn_cmd))  # test rapido opzionale
+    app.add_handler(CommandHandler("testbtn", testbtn_cmd))
     app.add_handler(CommandHandler("cerca", search_cmd))
     app.add_handler(CommandHandler("date", dates_cmd))
     app.add_handler(CommandHandler("miei", miei_cmd))
