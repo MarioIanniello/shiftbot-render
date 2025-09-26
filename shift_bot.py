@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni su Telegram
-Versione: 3.6.2
-- FIX robusto: salvataggio dopo scelta data senza passare extra nel callback
-  (mappa in memoria PENDING: calendar_message_id -> dati del post)
-- /cerca in privato (deep-link)
+Versione: 3.6.3
+- /cerca risponde in privato (deep-link se necessario)
+- /miei: in gruppo → DM; in privato → elenco diretto
+- Salvataggio robusto dopo scelta data (mappa PENDING)
+- "Contatta autore": DM all’autore con screenshot + messaggio
 - Stato turni open/closed + chiusura
-- "Contatta autore" → DM all’autore con screenshot + messaggio
+- Benvenuto ai nuovi membri
 """
 
 import os
@@ -24,7 +25,7 @@ from telegram.ext import (
     ContextTypes, filters, CallbackQueryHandler, ChatMemberHandler
 )
 
-VERSION = "ShiftBot 3.6.2"
+VERSION = "ShiftBot 3.6.3"
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
@@ -35,7 +36,7 @@ WELCOME_TEXT = (
     "Per cercare i turni:\n"
     "• `/cerca` → apre il calendario (in privato)\n"
     "• `/date` → elenco date con turni aperti\n"
-    "• `/miei` → i tuoi turni aperti (chiudili da lì)\n"
+    "• `/miei` → i tuoi turni aperti (risposta in privato)\n"
     "• `/version` → versione del bot\n"
 )
 
@@ -144,6 +145,7 @@ async def save_shift(msg: Message, date_iso: str) -> int:
 
 # ============== HANDLERS BASE ==============
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # deep-link: /start search | /start search-YYYY-MM-DD | /start miei
     payload = None
     if update.message and update.message.text:
         parts = update.message.text.split(maxsplit=1)
@@ -151,21 +153,25 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             payload = parts[1].strip()
 
     if update.effective_chat.type == ChatType.PRIVATE:
-        if payload and payload.startswith("search"):
-            date_iso = None
-            if "-" in payload:
-                try:
-                    maybe = payload.split("search-", 1)[1]
-                    datetime.strptime(maybe, "%Y-%m-%d")
-                    date_iso = maybe
-                except Exception:
-                    date_iso = None
-            if date_iso:
-                await show_shifts(update, ctx, date_iso)
-            else:
-                kb = build_calendar(datetime.today(), mode="SEARCH")
-                await update.effective_message.reply_text("📅 Seleziona la data che vuoi consultare:", reply_markup=kb)
-            return
+        if payload:
+            if payload.startswith("search"):
+                date_iso = None
+                if "-" in payload:
+                    try:
+                        maybe = payload.split("search-", 1)[1]
+                        datetime.strptime(maybe, "%Y-%m-%d")
+                        date_iso = maybe
+                    except Exception:
+                        date_iso = None
+                if date_iso:
+                    await show_shifts(update, ctx, date_iso)
+                else:
+                    kb = build_calendar(datetime.today(), mode="SEARCH")
+                    await update.effective_message.reply_text("📅 Seleziona la data che vuoi consultare:", reply_markup=kb)
+                return
+            if payload == "miei" and update.effective_user:
+                await miei_list_dm(ctx, update.effective_user.id)
+                return
 
         await update.effective_message.reply_text(WELCOME_TEXT, parse_mode="Markdown")
         return
@@ -177,6 +183,17 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def version_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(VERSION)
+
+async def welcome_new_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Saluta automaticamente chi entra nel gruppo."""
+    chm = update.chat_member
+    try:
+        old = chm.old_chat_member.status
+        new = chm.new_chat_member.status
+    except Exception:
+        return
+    if old in ("left", "kicked") and new in ("member", "restricted"):
+        await ctx.bot.send_message(chat_id=chm.chat.id, text=WELCOME_TEXT, parse_mode="Markdown")
 
 # ============== FOTO/DOC ==============
 async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -278,44 +295,64 @@ async def show_shifts_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, date_iso:
         info = f"{caption}\n" if caption else ""
         await ctx.bot.send_message(chat_id=user_id, text=info + "Azioni:", reply_markup=kb)
 
-# ============== ALTRI COMANDI ==============
-async def miei_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user:
-        return
+# ============== /MIEI: DM-first ==============
+async def miei_list_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""SELECT id, chat_id, message_id, date_iso, caption
                    FROM shifts
                    WHERE user_id=? AND status='open'
                    ORDER BY created_at DESC
-                   LIMIT 20""", (user.id,))
+                   LIMIT 20""", (user_id,))
     rows = cur.fetchall()
     conn.close()
 
     if not rows:
-        await update.effective_message.reply_text("Non hai turni aperti al momento.")
+        await ctx.bot.send_message(chat_id=user_id, text="Non hai turni aperti al momento.")
         return
 
-    await update.effective_message.reply_text("🧾 I tuoi turni aperti (max 20 più recenti):")
+    await ctx.bot.send_message(chat_id=user_id, text="🧾 I tuoi turni aperti (max 20 più recenti):")
     for sid, chat_id, message_id, date_iso, caption in rows:
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         try:
-            await ctx.bot.copy_message(
-                chat_id=update.effective_chat.id,
-                from_chat_id=chat_id,
-                message_id=message_id
-            )
+            await ctx.bot.copy_message(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
         except Exception:
             pass
-        await update.effective_message.reply_text(
-            f"📅 {human}\n{caption or ''}".strip(),
+        await ctx.bot.send_message(
+            chat_id=user_id,
+            text=f"📅 {human}\n{caption or ''}".strip(),
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{sid}"),
                  InlineKeyboardButton("✅ Segna scambiato", callback_data=f"CLOSE|{sid}")]
             ])
         )
 
+async def miei_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+
+    # In gruppo → rispondi in privato
+    if update.effective_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        try:
+            await ctx.bot.send_message(chat_id=user.id, text="📬 Ti invio in privato i tuoi turni aperti…")
+            await miei_list_dm(ctx, user.id)
+            await update.effective_message.reply_text("📬 Ti ho scritto in privato con i tuoi turni.")
+        except Forbidden:
+            bot_username = ctx.bot.username or "this_bot"
+            url = f"https://t.me/{bot_username}?start=miei"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata", url=url)]])
+            await update.effective_message.reply_text(
+                "⚠️ Per mostrarti i tuoi turni devo scriverti in privato.\n"
+                "Clicca qui sotto per aprire la chat con me:",
+                reply_markup=kb
+            )
+        return
+
+    # In privato → mostra direttamente
+    await miei_list_dm(ctx, user.id)
+
+# ============== SHOW & DATES ==============
 async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: str):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -420,6 +457,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         cal_msg_id = query.message.message_id if query.message else None
         data = PENDING.pop(cal_msg_id, None)
 
+        # Fallback legacy: SETDATE|date|chat|msg|user
         if (not data) and len(parts) >= 5:
             try:
                 data = {
@@ -550,22 +588,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await query.answer("Impossibile inviare il messaggio all’autore.", show_alert=True)
 
-async def welcome_new_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Saluta automaticamente chi entra nel gruppo."""
-    chm = update.chat_member
-    try:
-        old = chm.old_chat_member.status
-        new = chm.new_chat_member.status
-    except Exception:
-        return
-
-    # nuovo membro che entra
-    if old in ("left", "kicked") and new in ("member", "restricted"):
-        await ctx.bot.send_message(
-            chat_id=chm.chat.id,
-            text=WELCOME_TEXT,
-            parse_mode="Markdown"
-        )
 # ============== MAIN ==============
 def main():
     if not TOKEN:
