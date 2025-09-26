@@ -1,10 +1,57 @@
+        conn.close()
+
+        human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+        await query.edit_message_text(f"✅ Turno segnato come *scambiato* ({human}).", parse_mode="Markdown")
+
+    elif parts[0] == "CONTACT":
+        try:
+            shift_id = int(parts[1])
+        except Exception:
+            await query.answer("ID turno non valido.", show_alert=True)
+            return
+
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""SELECT chat_id, message_id, user_id, username, date_iso
+                       FROM shifts WHERE id=?""", (shift_id,))
+        row = cur.fetchone()
+        conn.close()
+
+        if not row:
+            await query.answer("Turno non trovato.", show_alert=True)
+            return
+
+        src_chat_id, src_msg_id, owner_id, owner_username, date_iso = row
+        requester = update.effective_user
+        requester_name = mention_html(requester.id if requester else None,
+                                      f"@{requester.username}" if requester and requester.username else None)
+
+        try:
+            await ctx.bot.copy_message(chat_id=owner_id, from_chat_id=src_chat_id, message_id=src_msg_id)
+            human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y") if date_iso else ""
+            text_html = (
+                f'{requester_name} ti ha contattato per il tuo turno del <b>{human}</b>.\n\n'
+                f'<b>Ciao, questo turno è ancora disponibile?</b>'
+            )
+            await ctx.bot.send_message(chat_id=owner_id, text=text_html, parse_mode="HTML")
+            await query.message.reply_text("📬 Ho scritto all’autore in privato. Attendi la risposta.")
+        except Forbidden:
+            btns = None
+            if owner_username and isinstance(owner_username, str) and owner_username.startswith("@"):
+                handle = owner_username[1:]
+                btns = InlineKeyboardMarkup([[InlineKeyboardButton("👤 Apri profilo autore", url=f"https://t.me/{handle}")]])
+            await query.message.reply_text(
+                "⚠️ Non posso scrivere all’autore in privato perché non ha avviato il bot.\n"
+                "Contattalo direttamente dal profilo:",
+                reply_markup=btns
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni su Telegram
-Versione: 3.6.1
-- FIX: salvataggio dopo scelta data (SETDATE) senza "finto Message"
-- /cerca in privato (deep-link se necessario)
+Versione: 3.6.2
+- FIX robusto: salvataggio dopo scelta data senza passare extra nel callback
+  (si usa una mappa in memoria PENDING: calendar_message_id -> dati del post)
+- /cerca in privato (deep-link)
 - Stato turni open/closed + chiusura
 - "Contatta autore" → DM all’autore con screenshot + messaggio
 """
@@ -13,7 +60,7 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from telegram.constants import ChatType
@@ -23,14 +70,14 @@ from telegram.ext import (
     ContextTypes, filters, CallbackQueryHandler, ChatMemberHandler
 )
 
-VERSION = "ShiftBot 3.6.1"
+VERSION = "ShiftBot 3.6.2"
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
 WELCOME_TEXT = (
     "👋 Benvenuto/a nel gruppo *Cambi Servizi*!\n\n"
     "Per caricare i turni:\n"
-    "• Invia l’immagine del turno con una breve descrizione (es. Cambio per mattina, Cambio per intermedia , ,Cambio per pomeriggio)\n\n"
+    "• Invia l’immagine del turno con una breve descrizione (es. Cambio per mattina, Cambio per intermedia, Cambio per pomeriggio)\n\n"
     "Per cercare i turni:\n"
     "• `/cerca` → apre il calendario (in privato)\n"
     "• `/date` → elenco date con turni aperti\n"
@@ -42,6 +89,9 @@ DATE_PATTERNS = [
     r'(?P<d>\d{1,2})[\/\-\.\s](?P<m>\d{1,2})[\/\-\.\s](?P<y>\d{4})',
     r'(?P<y>\d{4})[\/\-\.\s](?P<m>\d{1,2})[\/\-\.\s](?P<d>\d{1,2})',
 ]
+
+# ====== Stato in memoria (resettato a ogni riavvio) ======
+PENDING: Dict[int, Dict[str, Any]] = {}  # key = calendar_message_id
 
 # ============== DB ==============
 def ensure_db():
@@ -61,7 +111,6 @@ def ensure_db():
             created_at TEXT DEFAULT (datetime('now'))
         );
     """)
-    # migrazione: aggiungi colonna status se manca
     cur.execute("PRAGMA table_info(shifts);")
     cols = [r[1] for r in cur.fetchall()]
     if "status" not in cols:
@@ -114,7 +163,6 @@ async def is_user_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE, user_id:
 # ============== SALVATAGGIO ==============
 def save_shift_raw(chat_id: int, message_id: int, user_id: Optional[int],
                    username: Optional[str], caption: str, date_iso: str) -> int:
-    """Salva direttamente i campi, senza richiedere un oggetto Message."""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
@@ -128,7 +176,6 @@ def save_shift_raw(chat_id: int, message_id: int, user_id: Optional[int],
     return new_id
 
 async def save_shift(msg: Message, date_iso: str) -> int:
-    """Compatibilità per i casi in cui abbiamo il Message originale (data già in didascalia)."""
     username = ""
     if msg.from_user:
         username = f"@{msg.from_user.username}" if msg.from_user.username else msg.from_user.full_name
@@ -143,7 +190,6 @@ async def save_shift(msg: Message, date_iso: str) -> int:
 
 # ============== HANDLERS BASE ==============
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # gestione deep-link: /start search  | /start search-YYYY-MM-DD
     payload = None
     if update.message and update.message.text:
         parts = update.message.text.split(maxsplit=1)
@@ -178,14 +224,6 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def version_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(VERSION)
 
-async def testbtn_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text("Test OK")
-
-async def welcome_new_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    chm = update.chat_member
-    if chm.old_chat_member.status in ("left", "kicked") and chm.new_chat_member.status == "member":
-        await ctx.bot.send_message(chat_id=chm.chat.id, text=WELCOME_TEXT, parse_mode="Markdown")
-
 # ============== FOTO/DOC ==============
 async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -196,9 +234,16 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
     date_iso = parse_date(caption)
 
     if not date_iso:
-        extra = f"{msg.chat.id}|{msg.message_id}|{msg.from_user.id if msg.from_user else 0}"
-        kb = build_calendar(datetime.today(), mode="SETDATE", extra=extra)
-        await msg.reply_text("📅 Seleziona la data per questo turno:", reply_markup=kb)
+        # Mostra calendario e registra i dati nella mappa PENDING legati al messaggio del calendario
+        kb = build_calendar(datetime.today(), mode="SETDATE")
+        cal = await msg.reply_text("📅 Seleziona la data per questo turno:", reply_markup=kb)
+        PENDING[cal.message_id] = {
+            "src_chat_id": msg.chat.id,
+            "src_msg_id": msg.message_id,
+            "owner_id": (msg.from_user.id if msg.from_user else None),
+            "owner_username": (f"@{msg.from_user.username}" if msg.from_user and msg.from_user.username else (msg.from_user.full_name if msg.from_user else "")),
+            "caption": caption,
+        }
         return
 
     new_id = await save_shift(msg, date_iso)
@@ -206,7 +251,6 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
     human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
     await update.effective_message.reply_text(f"✅ Turno registrato per il {human}")
 
-    # azioni sotto
     await ctx.bot.send_message(
         chat_id=msg.chat.id,
         text="Azioni:",
@@ -249,7 +293,6 @@ async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # in privato
     if date_iso:
         await show_shifts(update, ctx, date_iso)
     else:
@@ -396,9 +439,7 @@ def build_calendar(base_date: datetime, mode="SETDATE", extra="") -> InlineKeybo
 
     day = first_day
     while day.month == month:
-        cb = f"{mode}|{day.strftime('%Y-%m-%d')}"
-        if extra:
-            cb += "|" + extra
+        cb = f"{mode}|{day.strftime('%Y-%m-%d')}"  # niente extra qui
         week.append(InlineKeyboardButton(str(day.day), callback_data=cb))
         if len(week) == 7:
             keyboard.append(week); week = []
@@ -410,8 +451,8 @@ def build_calendar(base_date: datetime, mode="SETDATE", extra="") -> InlineKeybo
         keyboard.append(week)
 
     keyboard.append([
-        InlineKeyboardButton("<", callback_data=f"NAV|{mode}|{prev_month.strftime('%Y-%m-%d')}|{extra}"),
-        InlineKeyboardButton(">", callback_data=f"NAV|{mode}|{next_month.strftime('%Y-%m-%d')}|{extra}")
+        InlineKeyboardButton("<", callback_data=f"NAV|{mode}|{prev_month.strftime('%Y-%m-%d')}|"),
+        InlineKeyboardButton(">", callback_data=f"NAV|{mode}|{next_month.strftime('%Y-%m-%d')}|")
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -422,30 +463,43 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     parts = (query.data or "").split("|")
 
     if parts[0] == "SETDATE":
-        # SETDATE|YYYY-MM-DD|chat_id|message_id|user_id
         date_iso = parts[1]
-        chat_id = int(parts[2]) if len(parts) > 2 else None
-        message_id = int(parts[3]) if len(parts) > 3 else None
-        user_id = int(parts[4]) if len(parts) > 4 else None
 
-        # prova a recuperare username reale dell’autore
-        owner_username = ""
-        try:
-            if chat_id and user_id:
-                member = await ctx.bot.get_chat_member(chat_id, user_id)
-                if member and member.user:
-                    owner_username = f"@{member.user.username}" if member.user.username else member.user.full_name
-        except Exception:
-            pass
+        # 1) Recupera dati dalla mappa PENDING usando l'ID del messaggio del calendario
+        cal_msg_id = query.message.message_id if query.message else None
+        data = PENDING.pop(cal_msg_id, None)
 
-        new_id = save_shift_raw(chat_id, message_id, user_id, owner_username, caption="", date_iso=date_iso)
+        # 2) Fallback: supporta il vecchio formato con extra (SETDATE|date|chat|msg|user)
+        if (not data) and len(parts) >= 5:
+            try:
+                data = {
+                    "src_chat_id": int(parts[2]),
+                    "src_msg_id": int(parts[3]),
+                    "owner_id": int(parts[4]),
+                    "owner_username": "",
+                    "caption": "",
+                }
+            except Exception:
+                data = None
+
+        if not data:
+            await query.edit_message_text("❌ Non riesco a collegare questo calendario al post originale. Rimanda la foto.")
+            return
+
+        new_id = save_shift_raw(
+            chat_id=data["src_chat_id"],
+            message_id=data["src_msg_id"],
+            user_id=data["owner_id"],
+            username=data.get("owner_username", ""),
+            caption=data.get("caption", ""),
+            date_iso=date_iso
+        )
 
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         await query.edit_message_text(f"✅ Turno registrato per il {human}")
 
-        # azioni sotto
         await ctx.bot.send_message(
-            chat_id=update.effective_chat.id,
+            chat_id=query.message.chat.id,
             text="Azioni:",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{new_id}"),
@@ -462,8 +516,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif parts[0] == "NAV":
         mode = parts[1]
         new_month = datetime.strptime(parts[2], "%Y-%m-%d")
-        extra = parts[3] if len(parts) > 3 else ""
-        kb = build_calendar(new_month, mode, extra)
+        kb = build_calendar(new_month, mode)
         await query.edit_message_reply_markup(reply_markup=kb)
 
     elif parts[0] == "CLOSE":
@@ -558,7 +611,6 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("version", version_cmd))
-    app.add_handler(CommandHandler("testbtn", testbtn_cmd))
     app.add_handler(CommandHandler("cerca", search_cmd))
     app.add_handler(CommandHandler("date", dates_cmd))
     app.add_handler(CommandHandler("miei", miei_cmd))
