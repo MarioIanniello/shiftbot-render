@@ -1,56 +1,10 @@
-        conn.close()
-
-        human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-        await query.edit_message_text(f"✅ Turno segnato come *scambiato* ({human}).", parse_mode="Markdown")
-
-    elif parts[0] == "CONTACT":
-        try:
-            shift_id = int(parts[1])
-        except Exception:
-            await query.answer("ID turno non valido.", show_alert=True)
-            return
-
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("""SELECT chat_id, message_id, user_id, username, date_iso
-                       FROM shifts WHERE id=?""", (shift_id,))
-        row = cur.fetchone()
-        conn.close()
-
-        if not row:
-            await query.answer("Turno non trovato.", show_alert=True)
-            return
-
-        src_chat_id, src_msg_id, owner_id, owner_username, date_iso = row
-        requester = update.effective_user
-        requester_name = mention_html(requester.id if requester else None,
-                                      f"@{requester.username}" if requester and requester.username else None)
-
-        try:
-            await ctx.bot.copy_message(chat_id=owner_id, from_chat_id=src_chat_id, message_id=src_msg_id)
-            human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y") if date_iso else ""
-            text_html = (
-                f'{requester_name} ti ha contattato per il tuo turno del <b>{human}</b>.\n\n'
-                f'<b>Ciao, questo turno è ancora disponibile?</b>'
-            )
-            await ctx.bot.send_message(chat_id=owner_id, text=text_html, parse_mode="HTML")
-            await query.message.reply_text("📬 Ho scritto all’autore in privato. Attendi la risposta.")
-        except Forbidden:
-            btns = None
-            if owner_username and isinstance(owner_username, str) and owner_username.startswith("@"):
-                handle = owner_username[1:]
-                btns = InlineKeyboardMarkup([[InlineKeyboardButton("👤 Apri profilo autore", url=f"https://t.me/{handle}")]])
-            await query.message.reply_text(
-                "⚠️ Non posso scrivere all’autore in privato perché non ha avviato il bot.\n"
-                "Contattalo direttamente dal profilo:",
-                reply_markup=btns
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni su Telegram
 Versione: 3.6.2
 - FIX robusto: salvataggio dopo scelta data senza passare extra nel callback
-  (si usa una mappa in memoria PENDING: calendar_message_id -> dati del post)
+  (mappa in memoria PENDING: calendar_message_id -> dati del post)
 - /cerca in privato (deep-link)
 - Stato turni open/closed + chiusura
 - "Contatta autore" → DM all’autore con screenshot + messaggio
@@ -234,7 +188,6 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
     date_iso = parse_date(caption)
 
     if not date_iso:
-        # Mostra calendario e registra i dati nella mappa PENDING legati al messaggio del calendario
         kb = build_calendar(datetime.today(), mode="SETDATE")
         cal = await msg.reply_text("📅 Seleziona la data per questo turno:", reply_markup=kb)
         PENDING[cal.message_id] = {
@@ -439,7 +392,7 @@ def build_calendar(base_date: datetime, mode="SETDATE", extra="") -> InlineKeybo
 
     day = first_day
     while day.month == month:
-        cb = f"{mode}|{day.strftime('%Y-%m-%d')}"  # niente extra qui
+        cb = f"{mode}|{day.strftime('%Y-%m-%d')}"  # niente extra
         week.append(InlineKeyboardButton(str(day.day), callback_data=cb))
         if len(week) == 7:
             keyboard.append(week); week = []
@@ -464,12 +417,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if parts[0] == "SETDATE":
         date_iso = parts[1]
-
-        # 1) Recupera dati dalla mappa PENDING usando l'ID del messaggio del calendario
         cal_msg_id = query.message.message_id if query.message else None
         data = PENDING.pop(cal_msg_id, None)
 
-        # 2) Fallback: supporta il vecchio formato con extra (SETDATE|date|chat|msg|user)
         if (not data) and len(parts) >= 5:
             try:
                 data = {
