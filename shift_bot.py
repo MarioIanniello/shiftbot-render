@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni su Telegram
-Versione: 3.7.0
+Versione: 3.7.1
 - Blocco doppio inserimento: un utente non può avere 2 turni "aperti" nella stessa data
+- In caso di duplicato: DM di avviso + rimozione dello screenshot dal gruppo
 - Messaggi di conferma/errore in DM; nel gruppo solo bottone per aprire la chat se il DM è bloccato
 - /cerca e /miei in privato (deep-link se necessario)
 - Salvataggio robusto dopo scelta data (mappa PENDING)
@@ -26,7 +27,7 @@ from telegram.ext import (
     ContextTypes, filters, CallbackQueryHandler, ChatMemberHandler
 )
 
-VERSION = "ShiftBot 3.7.0"
+VERSION = "ShiftBot 3.7.1"
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
@@ -108,7 +109,7 @@ def contact_buttons(shift_id: int, owner_username: Optional[str]) -> InlineKeybo
 async def dm_or_prompt_private(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, group_message: Message, text: str):
     """Prova a mandare un DM, altrimenti in gruppo mostra solo il bottone per aprire il DM."""
     try:
-        await ctx.bot.send_message(chat_id=user_id, text=text)
+        await ctx.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
     except Forbidden:
         bot_username = ctx.bot.username or "this_bot"
         url = f"https://t.me/{bot_username}?start=start"
@@ -245,6 +246,11 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
             f"⛔ Hai già un turno *aperto* per il {human}.\n"
             f"Chiudi quello esistente con *Segna scambiato* oppure usa /miei per gestirli."
         )
+        # rimuovi lo screenshot dal gruppo
+        try:
+            await ctx.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
+        except Exception:
+            pass
         return
 
     # Salvataggio e conferma SOLO in privato
@@ -504,9 +510,15 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await ctx.bot.send_message(
                     chat_id=owner_id,
                     text=(f"⛔ Hai già un turno *aperto* per il {human}.\n"
-                          f"Chiudi quello esistente con *Segna scambiato* oppure usa /miei per gestirli.")
+                          f"Chiudi quello esistente con *Segna scambiato* oppure usa /miei per gestirli."),
+                    parse_mode="Markdown"
                 )
-                # pulizia GUI calendario
+                # rimuovi lo screenshot originale dal gruppo
+                try:
+                    await ctx.bot.delete_message(chat_id=data["src_chat_id"], message_id=data["src_msg_id"])
+                except Exception:
+                    pass
+                # pulizia del calendario
                 try:
                     await query.message.delete()
                 except Exception:
@@ -515,6 +527,11 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 bot_username = ctx.bot.username or "this_bot"
                 url = f"https://t.me/{bot_username}?start=start"
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata con il bot", url=url)]])
+                # prova comunque a togliere il messaggio nel gruppo
+                try:
+                    await ctx.bot.delete_message(chat_id=data["src_chat_id"], message_id=data["src_msg_id"])
+                except Exception:
+                    pass
                 await query.edit_message_text(
                     f"⛔ Questo turno non è stato salvato: c'è già un tuo turno *aperto* per quella data.\n"
                     f"Apri la chat privata per i dettagli.",
