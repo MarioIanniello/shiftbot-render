@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni su Telegram
-Versione: 3.6
-- /cerca risponde in privato (deep-link se necessario)
+Versione: 3.6.1
+- FIX: salvataggio dopo scelta data (SETDATE) senza "finto Message"
+- /cerca in privato (deep-link se necessario)
 - Stato turni open/closed + chiusura
-- NUOVO: "📩 Contatta autore" invia in DM all'autore lo screenshot e la frase:
-         "Ciao, questo turno è ancora disponibile?" con menzione del richiedente.
-         Se l'autore non ha DM aperto col bot → avviso e link profilo autore al richiedente.
+- "Contatta autore" → DM all’autore con screenshot + messaggio
 """
 
 import os
@@ -24,14 +23,14 @@ from telegram.ext import (
     ContextTypes, filters, CallbackQueryHandler, ChatMemberHandler
 )
 
-VERSION = "ShiftBot 3.6"
+VERSION = "ShiftBot 3.6.1"
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
 WELCOME_TEXT = (
     "👋 Benvenuto/a nel gruppo *Cambi Servizi*!\n\n"
     "Per caricare i turni:\n"
-    "• Invia l’immagine del turno con una breve descrizione (es. Cambio per mattina, Cambio per interm. , Cambio per pomeriggio)\n\n"
+    "• Invia l’immagine del turno con una breve descrizione (es. Cambio per mattina, Cambio per intermedia , ,Cambio per pomeriggio)\n\n"
     "Per cercare i turni:\n"
     "• `/cerca` → apre il calendario (in privato)\n"
     "• `/date` → elenco date con turni aperti\n"
@@ -88,7 +87,6 @@ def parse_date(text: str) -> Optional[str]:
 
 # ============== UTILS CONTATTO ==============
 def mention_html(user_id: Optional[int], username: Optional[str]) -> str:
-    """Ritorna una menzione HTML sicura per il richiedente."""
     if username and isinstance(username, str) and username.startswith("@") and len(username) > 1:
         return username
     if user_id:
@@ -96,7 +94,6 @@ def mention_html(user_id: Optional[int], username: Optional[str]) -> str:
     return "utente"
 
 def contact_buttons(shift_id: int, owner_username: Optional[str]) -> InlineKeyboardMarkup:
-    """Pulsanti: contatto assistito + (opzionale) apri profilo autore."""
     row = [InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{shift_id}")]
     if owner_username and owner_username.startswith("@") and len(owner_username) > 1:
         handle = owner_username[1:]
@@ -114,9 +111,39 @@ async def is_user_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE, user_id:
     except Exception:
         return False
 
+# ============== SALVATAGGIO ==============
+def save_shift_raw(chat_id: int, message_id: int, user_id: Optional[int],
+                   username: Optional[str], caption: str, date_iso: str) -> int:
+    """Salva direttamente i campi, senza richiedere un oggetto Message."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO shifts(chat_id, message_id, user_id, username, date_iso, caption, photo_file_id, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'open')""",
+        (chat_id, message_id, user_id, (username or ""), date_iso, caption or "", None)
+    )
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return new_id
+
+async def save_shift(msg: Message, date_iso: str) -> int:
+    """Compatibilità per i casi in cui abbiamo il Message originale (data già in didascalia)."""
+    username = ""
+    if msg.from_user:
+        username = f"@{msg.from_user.username}" if msg.from_user.username else msg.from_user.full_name
+    return save_shift_raw(
+        chat_id=msg.chat.id,
+        message_id=msg.message_id,
+        user_id=(msg.from_user.id if msg.from_user else None),
+        username=username,
+        caption=(msg.caption or ""),
+        date_iso=date_iso
+    )
+
 # ============== HANDLERS BASE ==============
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # deep-link per /start search o /start search-YYYY-MM-DD
+    # gestione deep-link: /start search  | /start search-YYYY-MM-DD
     payload = None
     if update.message and update.message.text:
         parts = update.message.text.split(maxsplit=1)
@@ -124,23 +151,22 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             payload = parts[1].strip()
 
     if update.effective_chat.type == ChatType.PRIVATE:
-        if payload:
-            if payload.startswith("search"):
-                date_iso = None
-                if "-" in payload:
-                    try:
-                        maybe = payload.split("search-", 1)[1]
-                        datetime.strptime(maybe, "%Y-%m-%d")
-                        date_iso = maybe
-                    except Exception:
-                        date_iso = None
-                if date_iso:
-                    fake_update = update
-                    await show_shifts(fake_update, ctx, date_iso)
-                else:
-                    kb = build_calendar(datetime.today(), mode="SEARCH")
-                    await update.effective_message.reply_text("📅 Seleziona la data che vuoi consultare:", reply_markup=kb)
-                return
+        if payload and payload.startswith("search"):
+            date_iso = None
+            if "-" in payload:
+                try:
+                    maybe = payload.split("search-", 1)[1]
+                    datetime.strptime(maybe, "%Y-%m-%d")
+                    date_iso = maybe
+                except Exception:
+                    date_iso = None
+            if date_iso:
+                await show_shifts(update, ctx, date_iso)
+            else:
+                kb = build_calendar(datetime.today(), mode="SEARCH")
+                await update.effective_message.reply_text("📅 Seleziona la data che vuoi consultare:", reply_markup=kb)
+            return
+
         await update.effective_message.reply_text(WELCOME_TEXT, parse_mode="Markdown")
         return
 
@@ -180,8 +206,7 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
     human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
     await update.effective_message.reply_text(f"✅ Turno registrato per il {human}")
 
-    # pulsanti sotto al post: contatto + chiusura
-    owner_username = f"@{msg.from_user.username}" if (msg.from_user and msg.from_user.username) else (msg.from_user.full_name if msg.from_user else "")
+    # azioni sotto
     await ctx.bot.send_message(
         chat_id=msg.chat.id,
         text="Azioni:",
@@ -190,25 +215,6 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
              InlineKeyboardButton("✅ Segna scambiato", callback_data=f"CLOSE|{new_id}")]
         ])
     )
-
-async def save_shift(msg: Message, date_iso: str) -> int:
-    username = ""
-    if msg.from_user:
-        username = f"@{msg.from_user.username}" if msg.from_user.username else msg.from_user.full_name
-
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        """INSERT INTO shifts(chat_id, message_id, user_id, username, date_iso, caption, photo_file_id, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'open')""",
-        (msg.chat.id, msg.message_id,
-         msg.from_user.id if msg.from_user else None,
-         username, date_iso, msg.caption or "", None)
-    )
-    conn.commit()
-    new_id = cur.lastrowid
-    conn.close()
-    return new_id
 
 # ============== CERCA (DM-first) ==============
 async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -272,7 +278,6 @@ async def show_shifts_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, date_iso:
             await ctx.bot.copy_message(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
         except Exception:
             pass
-        # pulsanti: contatto assistito + profilo autore (se esiste handle)
         kb = contact_buttons(sid, username if username and username.startswith("@") else None)
         info = f"{caption}\n" if caption else ""
         await ctx.bot.send_message(chat_id=user_id, text=info + "Azioni:", reply_markup=kb)
@@ -332,7 +337,7 @@ async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: 
     human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
     await update.effective_message.reply_text(f"📅 Turni trovati per *{human}*: {len(rows)}", parse_mode="Markdown")
 
-    for (sid, chat_id, message_id, owner_id, username, caption) in rows:
+    for (sid, chat_id, message_id, user_id, username, caption) in rows:
         try:
             await ctx.bot.copy_message(
                 chat_id=update.effective_chat.id,
@@ -342,7 +347,6 @@ async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: 
         except Exception:
             pass
 
-        # pulsanti contatto assistito + profilo + chiudi
         btns = [
             InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{sid}"),
             InlineKeyboardButton("✅ Segna scambiato", callback_data=f"CLOSE|{sid}")
@@ -418,23 +422,28 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     parts = (query.data or "").split("|")
 
     if parts[0] == "SETDATE":
+        # SETDATE|YYYY-MM-DD|chat_id|message_id|user_id
         date_iso = parts[1]
         chat_id = int(parts[2]) if len(parts) > 2 else None
         message_id = int(parts[3]) if len(parts) > 3 else None
         user_id = int(parts[4]) if len(parts) > 4 else None
 
-        fake = type("obj", (), {})()
-        fake.chat = type("c", (), {"id": chat_id})
-        fake.message_id = message_id
-        fake.caption = ""
-        fake.photo = None
-        fake.from_user = type("u", (), {"id": user_id, "username": None, "full_name": "Utente"})
+        # prova a recuperare username reale dell’autore
+        owner_username = ""
+        try:
+            if chat_id and user_id:
+                member = await ctx.bot.get_chat_member(chat_id, user_id)
+                if member and member.user:
+                    owner_username = f"@{member.user.username}" if member.user.username else member.user.full_name
+        except Exception:
+            pass
 
-        new_id = await save_shift(fake, date_iso)
+        new_id = save_shift_raw(chat_id, message_id, user_id, owner_username, caption="", date_iso=date_iso)
 
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         await query.edit_message_text(f"✅ Turno registrato per il {human}")
 
+        # azioni sotto
         await ctx.bot.send_message(
             chat_id=update.effective_chat.id,
             text="Azioni:",
@@ -458,7 +467,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=kb)
 
     elif parts[0] == "CLOSE":
-        # chiusura turno
         try:
             shift_id = int(parts[1])
         except Exception:
@@ -495,14 +503,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✅ Turno segnato come *scambiato* ({human}).", parse_mode="Markdown")
 
     elif parts[0] == "CONTACT":
-        # contatto assistito: inoltra al proprietario il post + messaggio standard
         try:
             shift_id = int(parts[1])
         except Exception:
             await query.answer("ID turno non valido.", show_alert=True)
             return
 
-        # prendi dati turno
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("""SELECT chat_id, message_id, user_id, username, date_iso
@@ -519,22 +525,16 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         requester_name = mention_html(requester.id if requester else None,
                                       f"@{requester.username}" if requester and requester.username else None)
 
-        # prova invio DM all'autore
         try:
-            # 1) copia lo screenshot/originale
             await ctx.bot.copy_message(chat_id=owner_id, from_chat_id=src_chat_id, message_id=src_msg_id)
-            # 2) invia il testo con menzione del richiedente + domanda
             human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y") if date_iso else ""
-            text = f"{requester_name} ti ha scritto riguardo al tuo turno del *{human}*.\n\n" \
-                   f"**Ciao, questo turno è ancora disponibile?**"
-            # invia in Markdown+HTML safe: meglio HTML per la menzione tg://user
-            text_html = f'{mention_html(requester.id if requester else None, f"@{requester.username}" if requester and requester.username else None)} ' \
-                        f'ti ha contattato per il tuo turno del <b>{human}</b>.\n\n' \
-                        f'<b>Ciao, questo turno è ancora disponibile?</b>'
+            text_html = (
+                f'{requester_name} ti ha contattato per il tuo turno del <b>{human}</b>.\n\n'
+                f'<b>Ciao, questo turno è ancora disponibile?</b>'
+            )
             await ctx.bot.send_message(chat_id=owner_id, text=text_html, parse_mode="HTML")
-            await query.answer("Richiesta inviata all'autore in privato ✅", show_alert=False)
+            await query.message.reply_text("📬 Ho scritto all’autore in privato. Attendi la risposta.")
         except Forbidden:
-            # autore non ha DM aperto col bot → avvisa richiedente e offri link profilo autore
             btns = None
             if owner_username and isinstance(owner_username, str) and owner_username.startswith("@"):
                 handle = owner_username[1:]
@@ -546,11 +546,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             await query.answer("Impossibile inviare il messaggio all’autore.", show_alert=True)
-        else:
-            # conferma al richiedente (nel gruppo o DM)
-            await query.message.reply_text("📬 Ho scritto all’autore in privato. Attendi la risposta.")
-            # fine CONTACT
-            return
 
 # ============== MAIN ==============
 def main():
