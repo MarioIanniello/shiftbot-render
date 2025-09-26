@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni su Telegram
-Versione: 3.6.3
+Versione: 3.6.4
+- Dopo il salvataggio mostra solo la conferma "✅ Turno registrato per …" (niente "Azioni")
 - /cerca risponde in privato (deep-link se necessario)
 - /miei: in gruppo → DM; in privato → elenco diretto
 - Salvataggio robusto dopo scelta data (mappa PENDING)
@@ -15,7 +16,7 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timedelta
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Dict, Any
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from telegram.constants import ChatType
@@ -25,7 +26,7 @@ from telegram.ext import (
     ContextTypes, filters, CallbackQueryHandler, ChatMemberHandler
 )
 
-VERSION = "ShiftBot 3.6.3"
+VERSION = "ShiftBot 3.6.4"
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
@@ -103,9 +104,6 @@ def contact_buttons(shift_id: int, owner_username: Optional[str]) -> InlineKeybo
         handle = owner_username[1:]
         row.append(InlineKeyboardButton("👤 Profilo autore", url=f"https://t.me/{handle}"))
     return InlineKeyboardMarkup([row])
-
-def close_button(shift_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Segna scambiato", callback_data=f"CLOSE|{shift_id}")]])
 
 # ============== PERMESSI ==============
 async def is_user_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
@@ -216,19 +214,10 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
         }
         return
 
-    new_id = await save_shift(msg, date_iso)
-
+    # Salvataggio e sola conferma (niente "Azioni")
+    await save_shift(msg, date_iso)
     human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
     await update.effective_message.reply_text(f"✅ Turno registrato per il {human}")
-
-    await ctx.bot.send_message(
-        chat_id=msg.chat.id,
-        text="Azioni:",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{new_id}"),
-             InlineKeyboardButton("✅ Segna scambiato", callback_data=f"CLOSE|{new_id}")]
-        ])
-    )
 
 # ============== CERCA (DM-first) ==============
 async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -474,7 +463,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Non riesco a collegare questo calendario al post originale. Rimanda la foto.")
             return
 
-        new_id = save_shift_raw(
+        # Salva e mostra solo conferma (niente "Azioni")
+        save_shift_raw(
             chat_id=data["src_chat_id"],
             message_id=data["src_msg_id"],
             user_id=data["owner_id"],
@@ -485,15 +475,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         await query.edit_message_text(f"✅ Turno registrato per il {human}")
-
-        await ctx.bot.send_message(
-            chat_id=query.message.chat.id,
-            text="Azioni:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{new_id}"),
-                 InlineKeyboardButton("✅ Segna scambiato", callback_data=f"CLOSE|{new_id}")]
-            ])
-        )
+        return
 
     elif parts[0] == "SEARCH":
         date_iso = parts[1]
