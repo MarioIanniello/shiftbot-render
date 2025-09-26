@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni su Telegram
-Versione: 3.6.4
-- Dopo il salvataggio mostra solo la conferma "✅ Turno registrato per …" (niente "Azioni")
-- /cerca risponde in privato (deep-link se necessario)
-- /miei: in gruppo → DM; in privato → elenco diretto
+Versione: 3.6.5
+- Conferma di registrazione turno SOLO in privato all’autore (DM)
+- In caso di impossibilità a scrivere in DM → nel gruppo appare solo un bottone per aprire la chat privata
+- /cerca e /miei in privato (deep-link se necessario)
 - Salvataggio robusto dopo scelta data (mappa PENDING)
 - "Contatta autore": DM all’autore con screenshot + messaggio
 - Stato turni open/closed + chiusura
@@ -26,7 +26,7 @@ from telegram.ext import (
     ContextTypes, filters, CallbackQueryHandler, ChatMemberHandler
 )
 
-VERSION = "ShiftBot 3.6.4"
+VERSION = "ShiftBot 3.6.5"
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
@@ -214,10 +214,17 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
         }
         return
 
-    # Salvataggio e sola conferma (niente "Azioni")
+    # Salvataggio e conferma SOLO in privato
     await save_shift(msg, date_iso)
     human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-    await update.effective_message.reply_text(f"✅ Turno registrato per il {human}")
+    try:
+        await ctx.bot.send_message(chat_id=msg.from_user.id, text=f"✅ Turno registrato per il {human}")
+    except Forbidden:
+        # L'utente non ha avviato il bot in privato → mostra solo pulsante per aprire la chat
+        bot_username = ctx.bot.username or "this_bot"
+        url = f"https://t.me/{bot_username}?start=start"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata con il bot", url=url)]])
+        await msg.reply_text("✅ Turno registrato. Per ricevere le conferme in privato, apri la chat con me:", reply_markup=kb)
 
 # ============== CERCA (DM-first) ==============
 async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -463,7 +470,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Non riesco a collegare questo calendario al post originale. Rimanda la foto.")
             return
 
-        # Salva e mostra solo conferma (niente "Azioni")
+        # Salva
         save_shift_raw(
             chat_id=data["src_chat_id"],
             message_id=data["src_msg_id"],
@@ -473,8 +480,25 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             date_iso=date_iso
         )
 
+        # Invio conferma SOLO in privato
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-        await query.edit_message_text(f"✅ Turno registrato per il {human}")
+        try:
+            await ctx.bot.send_message(chat_id=data["owner_id"], text=f"✅ Turno registrato per il {human}")
+            # Rimuovi il calendario dal gruppo per non lasciare conferme lì
+            try:
+                await query.message.delete()
+            except Exception:
+                # se non posso cancellare, almeno tolgo la tastiera
+                await query.edit_message_reply_markup(reply_markup=None)
+        except Forbidden:
+            # Non posso scrivere in privato → lascio un bottone per aprire la chat
+            bot_username = ctx.bot.username or "this_bot"
+            url = f"https://t.me/{bot_username}?start=start"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata con il bot", url=url)]])
+            await query.edit_message_text(
+                "✅ Turno registrato. Per ricevere le conferme in privato, apri la chat con me:",
+                reply_markup=kb
+            )
         return
 
     elif parts[0] == "SEARCH":
