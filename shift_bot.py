@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni su Telegram
-Versione: 3.6.5
-- Conferma di registrazione turno SOLO in privato all’autore (DM)
-- In caso di impossibilità a scrivere in DM → nel gruppo appare solo un bottone per aprire la chat privata
+Versione: 3.7.0
+- Blocco doppio inserimento: un utente non può avere 2 turni "aperti" nella stessa data
+- Messaggi di conferma/errore in DM; nel gruppo solo bottone per aprire la chat se il DM è bloccato
 - /cerca e /miei in privato (deep-link se necessario)
 - Salvataggio robusto dopo scelta data (mappa PENDING)
 - "Contatta autore": DM all’autore con screenshot + messaggio
@@ -26,7 +26,7 @@ from telegram.ext import (
     ContextTypes, filters, CallbackQueryHandler, ChatMemberHandler
 )
 
-VERSION = "ShiftBot 3.6.5"
+VERSION = "ShiftBot 3.7.0"
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
@@ -90,7 +90,7 @@ def parse_date(text: str) -> Optional[str]:
                 continue
     return None
 
-# ============== UTILS CONTATTO ==============
+# ============== UTILS CONTATTO & DM ==============
 def mention_html(user_id: Optional[int], username: Optional[str]) -> str:
     if username and isinstance(username, str) and username.startswith("@") and len(username) > 1:
         return username
@@ -105,6 +105,16 @@ def contact_buttons(shift_id: int, owner_username: Optional[str]) -> InlineKeybo
         row.append(InlineKeyboardButton("👤 Profilo autore", url=f"https://t.me/{handle}"))
     return InlineKeyboardMarkup([row])
 
+async def dm_or_prompt_private(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, group_message: Message, text: str):
+    """Prova a mandare un DM, altrimenti in gruppo mostra solo il bottone per aprire il DM."""
+    try:
+        await ctx.bot.send_message(chat_id=user_id, text=text)
+    except Forbidden:
+        bot_username = ctx.bot.username or "this_bot"
+        url = f"https://t.me/{bot_username}?start=start"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata con il bot", url=url)]])
+        await group_message.reply_text("ℹ️ Non posso scriverti in privato finché non apri la chat con me:", reply_markup=kb)
+
 # ============== PERMESSI ==============
 async def is_user_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     try:
@@ -112,6 +122,18 @@ async def is_user_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE, user_id:
         return cm.status in ("administrator", "creator")
     except Exception:
         return False
+
+# ============== CHECK DUPLICATI ==============
+def has_open_on_date(user_id: int, date_iso: str) -> bool:
+    """True se l'utente ha già almeno un turno OPEN nella stessa data."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""SELECT 1 FROM shifts
+                   WHERE user_id=? AND date_iso=? AND status='open'
+                   LIMIT 1""", (user_id, date_iso))
+    row = cur.fetchone()
+    conn.close()
+    return row is not None
 
 # ============== SALVATAGGIO ==============
 def save_shift_raw(chat_id: int, message_id: int, user_id: Optional[int],
@@ -214,17 +236,21 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
         }
         return
 
+    # ---- BLOCCO DOPPIONE: stesso utente, stessa data, open ----
+    owner_id = msg.from_user.id if msg.from_user else None
+    if owner_id and has_open_on_date(owner_id, date_iso):
+        human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+        await dm_or_prompt_private(
+            ctx, owner_id, msg,
+            f"⛔ Hai già un turno *aperto* per il {human}.\n"
+            f"Chiudi quello esistente con *Segna scambiato* oppure usa /miei per gestirli."
+        )
+        return
+
     # Salvataggio e conferma SOLO in privato
     await save_shift(msg, date_iso)
     human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-    try:
-        await ctx.bot.send_message(chat_id=msg.from_user.id, text=f"✅ Turno registrato per il {human}")
-    except Forbidden:
-        # L'utente non ha avviato il bot in privato → mostra solo pulsante per aprire la chat
-        bot_username = ctx.bot.username or "this_bot"
-        url = f"https://t.me/{bot_username}?start=start"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata con il bot", url=url)]])
-        await msg.reply_text("✅ Turno registrato. Per ricevere le conferme in privato, apri la chat con me:", reply_markup=kb)
+    await dm_or_prompt_private(ctx, owner_id, msg, f"✅ Turno registrato per il {human}")
 
 # ============== CERCA (DM-first) ==============
 async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -470,11 +496,37 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Non riesco a collegare questo calendario al post originale. Rimanda la foto.")
             return
 
+        # ---- BLOCCO DOPPIONE ----
+        owner_id = data["owner_id"]
+        if owner_id and has_open_on_date(owner_id, date_iso):
+            human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+            try:
+                await ctx.bot.send_message(
+                    chat_id=owner_id,
+                    text=(f"⛔ Hai già un turno *aperto* per il {human}.\n"
+                          f"Chiudi quello esistente con *Segna scambiato* oppure usa /miei per gestirli.")
+                )
+                # pulizia GUI calendario
+                try:
+                    await query.message.delete()
+                except Exception:
+                    await query.edit_message_reply_markup(reply_markup=None)
+            except Forbidden:
+                bot_username = ctx.bot.username or "this_bot"
+                url = f"https://t.me/{bot_username}?start=start"
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata con il bot", url=url)]])
+                await query.edit_message_text(
+                    f"⛔ Questo turno non è stato salvato: c'è già un tuo turno *aperto* per quella data.\n"
+                    f"Apri la chat privata per i dettagli.",
+                    reply_markup=kb, parse_mode="Markdown"
+                )
+            return
+
         # Salva
         save_shift_raw(
             chat_id=data["src_chat_id"],
             message_id=data["src_msg_id"],
-            user_id=data["owner_id"],
+            user_id=owner_id,
             username=data.get("owner_username", ""),
             caption=data.get("caption", ""),
             date_iso=date_iso
@@ -483,15 +535,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Invio conferma SOLO in privato
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         try:
-            await ctx.bot.send_message(chat_id=data["owner_id"], text=f"✅ Turno registrato per il {human}")
-            # Rimuovi il calendario dal gruppo per non lasciare conferme lì
+            await ctx.bot.send_message(chat_id=owner_id, text=f"✅ Turno registrato per il {human}")
             try:
                 await query.message.delete()
             except Exception:
-                # se non posso cancellare, almeno tolgo la tastiera
                 await query.edit_message_reply_markup(reply_markup=None)
         except Forbidden:
-            # Non posso scrivere in privato → lascio un bottone per aprire la chat
             bot_username = ctx.bot.username or "this_bot"
             url = f"https://t.me/{bot_username}?start=start"
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata con il bot", url=url)]])
