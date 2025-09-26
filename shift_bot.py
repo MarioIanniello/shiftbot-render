@@ -550,6 +550,22 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await query.answer("Impossibile inviare il messaggio all’autore.", show_alert=True)
 
+async def welcome_new_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Saluta automaticamente chi entra nel gruppo."""
+    chm = update.chat_member
+    try:
+        old = chm.old_chat_member.status
+        new = chm.new_chat_member.status
+    except Exception:
+        return
+
+    # nuovo membro che entra
+    if old in ("left", "kicked") and new in ("member", "restricted"):
+        await ctx.bot.send_message(
+            chat_id=chm.chat.id,
+            text=WELCOME_TEXT,
+            parse_mode="Markdown"
+        )
 # ============== MAIN ==============
 def main():
     if not TOKEN:
