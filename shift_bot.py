@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni (Telegram)
-Versione: 4.0
+Versione: 4.1
 """
 
 import os
@@ -24,7 +24,7 @@ from telegram.ext import (
 )
 
 # ====== Config ======
-VERSION = "ShiftBot 4.0"
+VERSION = "ShiftBot 4.1"
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
@@ -102,15 +102,10 @@ async def is_user_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE, user_id:
     except Exception:
         return False
 
-def contact_buttons(shift_id: int, owner_username: Optional[str], owner_id: Optional[int]) -> InlineKeyboardMarkup:
-    if owner_username and owner_username.startswith("@") and len(owner_username) > 1:
-        open_chat_btn = InlineKeyboardButton("💬 Apri chat con autore", url=f"https://t.me/{owner_username[1:]}")
-    else:
-        open_chat_btn = InlineKeyboardButton("💬 Apri chat con autore", url=f"tg://user?id={owner_id}")
+def contact_only_buttons(shift_id: int) -> InlineKeyboardMarkup:
+    # Solo un bottone per /cerca, come richiesto
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{shift_id}"),
-        open_chat_btn,
-        InlineKeyboardButton("✅ Risolto", callback_data=f"CLOSE|{shift_id}")
+        InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{shift_id}")
     ]])
 
 async def dm_or_prompt_private(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, group_message: Message, text: str):
@@ -327,6 +322,8 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
     # ----- Singolo -----
     if not date_iso:
         kb = build_calendar(datetime.today(), mode="SETDATE")
+        file_id = (msg.photo[-1].file_id if msg.photo else
+                   (msg.document.file_id if getattr(msg, "document", None) and getattr(msg.document, "mime_type", "").startswith("image/") else None))
         cal = await msg.reply_text("📅 Seleziona la data per questo turno:", reply_markup=kb)
         PENDING[cal.message_id] = {
             "src_chat_id": msg.chat.id,
@@ -334,9 +331,7 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
             "owner_id": owner_id,
             "owner_username": owner_username,
             "caption": caption,
-            # salviamo anche file_id per sicurezza
-            "file_id": (msg.photo[-1].file_id if msg.photo else
-                        (msg.document.file_id if getattr(msg, "document", None) and getattr(msg.document, "mime_type", "").startswith("image/") else None))
+            "file_id": file_id
         }
         return
 
@@ -403,13 +398,13 @@ async def miei_list_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int):
                 sent_mid = m.message_id
             except Exception:
                 sent_mid = None
-        # se ancora nulla
+        # messaggio informativo se manca immagine
         if sent_mid is None:
             human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
             m = await ctx.bot.send_message(chat_id=user_id, text=f"📄 Turno del {human}\n(Immagine non disponibile)")
             sent_mid = m.message_id
 
-        # bottoni sotto allo screenshot
+        # bottoni sotto allo screenshot: SOLO ✅ Risolto
         await ctx.bot.send_message(
             chat_id=user_id,
             text="\u200B",
@@ -462,8 +457,8 @@ async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: 
                 sent_ok = True
             except Exception:
                 sent_ok = False
-        # bottoni sotto
-        kb = contact_buttons(shift_id=sid, owner_username=username, owner_id=_user_id)
+        # bottoni sotto: SOLO "📩 Contatta autore"
+        kb = contact_only_buttons(shift_id=sid)
         await update.effective_message.reply_text("\u200B", reply_markup=kb)
 
 async def dates_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -658,72 +653,94 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=kb)
 
     elif parts[0] == "CLOSE":
-        try: shift_id = int(parts[1])
+        # chiudi e RIMUOVI (post gruppo + riga DB)
+        try:
+            shift_id = int(parts[1])
         except Exception:
             await query.edit_message_text("❌ ID turno non valido.")
             return
 
+        # recupero dati turno
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("SELECT user_id, status, date_iso FROM shifts WHERE id=?", (shift_id,))
+        cur.execute("SELECT chat_id, message_id, user_id, status, date_iso FROM shifts WHERE id=?", (shift_id,))
         row = cur.fetchone()
+        conn.close()
+
         if not row:
-            conn.close()
             await query.edit_message_text("❌ Turno non trovato (forse già rimosso).")
             return
-        owner_id, status, date_iso = row
 
+        grp_chat_id, grp_msg_id, owner_id, status, date_iso = row
+
+        # permessi: proprietario o admin
         user = update.effective_user
         is_admin = await is_user_admin(update, ctx, user.id) if user else False
         if not user or (user.id != owner_id and not is_admin):
-            conn.close()
             await query.answer("Non hai i permessi per chiudere questo turno.", show_alert=True)
             return
 
-        if status == "closed":
-            conn.close()
-            await query.edit_message_text("ℹ️ Turno già segnato come risolto.")
-            return
+        # elimina messaggio nel gruppo (se ancora presente)
+        try:
+            await ctx.bot.delete_message(chat_id=grp_chat_id, message_id=grp_msg_id)
+        except Exception:
+            pass  # magari già cancellato
 
-        cur.execute("UPDATE shifts SET status='closed' WHERE id=?", (shift_id,))
+        # elimina dal DB
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM shifts WHERE id=?", (shift_id,))
         conn.commit()
         conn.close()
 
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-        await query.edit_message_text(f"✅ Turno segnato come <b>Risolto</b> ({human}).", parse_mode="HTML")
+        await query.edit_message_text(f"✅ Turno <b>Risolto</b> e rimosso ({human}).", parse_mode="HTML")
 
     elif parts[0] == "CONTACT":
-        try: shift_id = int(parts[1])
+        try:
+            shift_id = int(parts[1])
         except Exception:
             await query.answer("ID turno non valido.", show_alert=True)
             return
 
+        # recupera il messaggio originale per inoltrarlo in DM
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("""SELECT chat_id, message_id, user_id, username FROM shifts WHERE id=?""", (shift_id,))
+        cur.execute("""SELECT chat_id, message_id, user_id, username, photo_file_id FROM shifts WHERE id=?""", (shift_id,))
         row = cur.fetchone()
         conn.close()
         if not row:
             await query.answer("Turno non trovato.", show_alert=True)
             return
 
-        src_chat_id, src_msg_id, owner_id, owner_username = row
+        src_chat_id, src_msg_id, owner_id, owner_username, file_id = row
         requester = update.effective_user
         if not requester:
             await query.answer("Errore utente.", show_alert=True)
             return
 
-        # screenshot in DM al richiedente
+        # 1) screenshot in DM al richiedente
+        sent = False
         try:
             await ctx.bot.copy_message(chat_id=requester.id, from_chat_id=src_chat_id, message_id=src_msg_id)
+            sent = True
         except Forbidden:
             bot_username = ctx.bot.username or "this_bot"
             url_bot = f"https://t.me/{bot_username}?start=start"
             kb_dm = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat con il bot", url=url_bot)]])
             await query.message.reply_text("Per contattare l’autore apri prima la chat privata con me:", reply_markup=kb_dm)
             return
+        except Exception:
+            sent = False
 
-        # link chat autore
+        if not sent and file_id:
+            try:
+                await ctx.bot.send_photo(chat_id=requester.id, photo=file_id)
+                sent = True
+            except Exception:
+                sent = False
+
+        # 2) pulsante per aprire chat con autore + messaggio pronto
         if owner_username and owner_username.startswith("@") and len(owner_username) > 1:
             url_author = f"https://t.me/{owner_username[1:]}"
             label = f"Apri chat con {owner_username}"
@@ -740,6 +757,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                   f"{prompt}"),
             reply_markup=kb
         )
+
         await query.message.reply_text("✅ Ti ho inviato in privato lo screenshot e il pulsante per scrivere all’autore.")
 
 # ============== ROUTER DM TESTI ==============
@@ -754,6 +772,40 @@ async def private_text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if text in ("/miei", "i miei turni", "miei"):
         await miei_cmd(update, ctx); return
     await update.effective_message.reply_text("Usa i pulsanti qui sotto 👇", reply_markup=PRIVATE_KB)
+
+# ============== CALENDARIO ==============
+def build_calendar(base_date: datetime, mode="SETDATE", extra="") -> InlineKeyboardMarkup:
+    year, month = base_date.year, base_date.month
+    first_day = datetime(year, month, 1)
+    next_month = (first_day.replace(day=28) + timedelta(days=4)).replace(day=1)
+    prev_month = (first_day - timedelta(days=1)).replace(day=1)
+
+    kb = []
+    kb.append([InlineKeyboardButton(f"{month:02d}/{year}", callback_data="IGNORE")])
+    kb.append([InlineKeyboardButton(d, callback_data="IGNORE") for d in ["L","M","M","G","V","S","D"]])
+
+    week = []
+    for _ in range(first_day.weekday()):
+        week.append(InlineKeyboardButton(" ", callback_data="IGNORE"))
+
+    day = first_day
+    while day.month == month:
+        cb = f"{mode}|{day.strftime('%Y-%m-%d')}"
+        week.append(InlineKeyboardButton(str(day.day), callback_data=cb))
+        if len(week) == 7:
+            kb.append(week); week = []
+        day += timedelta(days=1)
+
+    if week:
+        while len(week) < 7:
+            week.append(InlineKeyboardButton(" ", callback_data="IGNORE"))
+        kb.append(week)
+
+    kb.append([
+        InlineKeyboardButton("<", callback_data=f"NAV|{mode}|{prev_month.strftime('%Y-%m-%d')}|"),
+        InlineKeyboardButton(">", callback_data=f"NAV|{mode}|{next_month.strftime('%Y-%m-%d')}|")
+    ])
+    return InlineKeyboardMarkup(kb)
 
 # ============== MAIN ========================
 def main():
