@@ -172,7 +172,7 @@ async def ensure_private_menu(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, text
 
 # Invia bottoni sotto un messaggio, con fallback
 async def send_buttons_below(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, replied_mid: Optional[int], markup: InlineKeyboardMarkup):
-    text = "⬇️"  # testo non vuoto
+    text = "\u00A0"  # NBSP invisibile ma valido per Telegram
     if replied_mid:
         try:
             await ctx.bot.send_message(
