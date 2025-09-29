@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni su Telegram
-Versione: 3.8.2 (album support)
+Versione: 3.8.2
 """
 
 import os
@@ -16,14 +16,14 @@ from telegram import (
     ReplyKeyboardMarkup, KeyboardButton
 )
 from telegram.constants import ChatType
-from telegram.error import Forbidden, BadRequest
+from telegram.error import Forbidden
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ContextTypes, filters, CallbackQueryHandler, ChatMemberHandler,
     ApplicationHandlerStop
 )
 
-VERSION = "ShiftBot 3.8.2 (album)"
+VERSION = "ShiftBot 3.8.2"
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
@@ -44,20 +44,6 @@ DATE_PATTERNS = [
 
 # ====== Stato in memoria (resettato a ogni riavvio) ======
 PENDING: Dict[int, Dict[str, Any]] = {}  # key = calendar_message_id
-
-# NEW: stato album in arrivo (key = media_group_id)
-MEDIA_GROUPS: Dict[str, Dict[str, Any]] = {
-    # media_group_id: {
-    #   "photos": [Message, ...],
-    #   "caption": str,
-    #   "date": "YYYY-MM-DD" | None,
-    #   "owner_id": int | None,
-    #   "owner_username": str,
-    #   "src_chat_id": int,
-    #   "calendar_msg_id": int | None,  # id del messaggio calendario creato
-    #   "notified": bool,               # per evitare doppi messaggi
-    # }
-}
 
 # ====== Tastiera persistente in DM ======
 PRIVATE_KB = ReplyKeyboardMarkup(
@@ -88,17 +74,11 @@ def ensure_db():
             created_at TEXT DEFAULT (datetime('now'))
         );
     """)
-    # soft-migrations
     cur.execute("PRAGMA table_info(shifts);")
     cols = [r[1] for r in cur.fetchall()]
     if "status" not in cols:
         try:
             cur.execute("ALTER TABLE shifts ADD COLUMN status TEXT DEFAULT 'open';")
-        except Exception:
-            pass
-    if "photo_file_id" not in cols:
-        try:
-            cur.execute("ALTER TABLE shifts ADD COLUMN photo_file_id TEXT;")
         except Exception:
             pass
     conn.commit()
@@ -160,14 +140,13 @@ def has_open_on_date(user_id: int, date_iso: str) -> bool:
     return row is not None
 
 def save_shift_raw(chat_id: int, message_id: int, user_id: Optional[int],
-                   username: Optional[str], caption: str, date_iso: str,
-                   file_id: Optional[str] = None) -> int:
+                   username: Optional[str], caption: str, date_iso: str) -> int:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
         """INSERT INTO shifts(chat_id, message_id, user_id, username, date_iso, caption, photo_file_id, status)
            VALUES (?, ?, ?, ?, ?, ?, ?, 'open')""",
-        (chat_id, message_id, user_id, (username or ""), date_iso, caption or "", file_id)
+        (chat_id, message_id, user_id, (username or ""), date_iso, caption or "", None)
     )
     conn.commit()
     new_id = cur.lastrowid
@@ -178,21 +157,13 @@ async def save_shift(msg: Message, date_iso: str) -> int:
     username = ""
     if msg.from_user:
         username = f"@{msg.from_user.username}" if msg.from_user.username else msg.from_user.full_name
-    # file_id per fallback (foto o documento immagine)
-    file_id = None
-    if msg.photo:
-        file_id = msg.photo[-1].file_id
-    elif getattr(msg, "document", None) and getattr(msg.document, "mime_type", "").startswith("image/"):
-        file_id = msg.document.file_id
-
     return save_shift_raw(
         chat_id=msg.chat.id,
         message_id=msg.message_id,
         user_id=(msg.from_user.id if msg.from_user else None),
         username=username,
         caption=(msg.caption or ""),
-        date_iso=date_iso,
-        file_id=file_id
+        date_iso=date_iso
     )
 
 async def ensure_private_menu(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str = None):
@@ -253,6 +224,7 @@ async def group_command_guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
             reply_markup=PRIVATE_KB
         )
+        # link diretto opzionale
         await ctx.bot.send_message(chat_id=user.id, text="Apri qui la chat privata:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata", url=url)]]))
     except Forbidden:
         pass
@@ -320,63 +292,8 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
     caption = (msg.caption or "").strip()
     date_iso = parse_date(caption)
 
-    # --- GESTIONE ALBUM (più immagini inviate insieme) ---
-    if msg.media_group_id:
-        gid = msg.media_group_id
-        owner_id = msg.from_user.id if msg.from_user else None
-        owner_username = (f"@{msg.from_user.username}" if msg.from_user and msg.from_user.username
-                          else (msg.from_user.full_name if msg.from_user else ""))
-
-        g = MEDIA_GROUPS.get(gid)
-        if not g:
-            g = MEDIA_GROUPS[gid] = {
-                "photos": [],
-                "caption": caption,
-                "date": None,
-                "owner_id": owner_id,
-                "owner_username": owner_username,
-                "src_chat_id": msg.chat.id,
-                "calendar_msg_id": None,
-                "notified": False,
-            }
-
-        # aggiorna caption se arriva una con testo
-        if caption and not g["caption"]:
-            g["caption"] = caption
-
-        # se la caption di QUALSIASI foto contiene data, usala per tutto l'album
-        if date_iso and not g["date"]:
-            g["date"] = date_iso
-
-        # accumula il messaggio foto/documento
-        g["photos"].append(msg)
-
-        # Se abbiamo già la data (in didascalia), salviamo ogni elemento man mano
-        if g["date"]:
-            # (opzionale) NON applicare blocco duplicati per album: è un'unica richiesta
-            await save_shift(msg, g["date"])
-            if not g["notified"]:
-                human = datetime.strptime(g["date"], "%Y-%m-%d").strftime("%d/%m/%Y")
-                try:
-                    await ctx.bot.send_message(chat_id=owner_id, text=f"✅ Turno (album) registrato per il {human}", reply_markup=PRIVATE_KB)
-                except Exception:
-                    pass
-                g["notified"] = True
-            return
-
-        # Se NON abbiamo ancora la data, mostriamo un SOLO calendario (una volta)
-        if not g["calendar_msg_id"]:
-            kb = build_calendar(datetime.today(), mode=f"SETDATEALBUM|{gid}")
-            cal = await msg.reply_text("📅 Seleziona la data per questo turno (album):", reply_markup=kb)
-            g["calendar_msg_id"] = cal.message_id
-        return
-
-    # --- SINGOLA IMMAGINE ---
     if not date_iso:
         kb = build_calendar(datetime.today(), mode="SETDATE")
-        # prepara dati per PENDING
-        file_id = (msg.photo[-1].file_id if msg.photo else
-                   (msg.document.file_id if getattr(msg, "document", None) and getattr(msg.document, "mime_type", "").startswith("image/") else None))
         cal = await msg.reply_text("📅 Seleziona la data per questo turno:", reply_markup=kb)
         PENDING[cal.message_id] = {
             "src_chat_id": msg.chat.id,
@@ -384,7 +301,6 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
             "owner_id": (msg.from_user.id if msg.from_user else None),
             "owner_username": (f"@{msg.from_user.username}" if msg.from_user and msg.from_user.username else (msg.from_user.full_name if msg.from_user else "")),
             "caption": caption,
-            "file_id": file_id,
         }
         return
 
@@ -430,11 +346,11 @@ async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def miei_list_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("""SELECT id, chat_id, message_id, date_iso, caption, photo_file_id
+    cur.execute("""SELECT id, chat_id, message_id, date_iso, caption
                    FROM shifts
                    WHERE user_id=? AND status='open'
                    ORDER BY created_at DESC
-                   LIMIT 50""", (user_id,))  # aumento a 50 per sicurezza
+                   LIMIT 20""", (user_id,))
     rows = cur.fetchall()
     conn.close()
 
@@ -442,30 +358,21 @@ async def miei_list_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int):
         await ctx.bot.send_message(chat_id=user_id, text="Non hai turni aperti al momento.", reply_markup=PRIVATE_KB)
         return
 
-    await ctx.bot.send_message(chat_id=user_id, text="🧾 I tuoi turni aperti:", reply_markup=PRIVATE_KB)
-    for sid, chat_id, message_id, date_iso, caption, file_id in rows:
+    await ctx.bot.send_message(chat_id=user_id, text="🧾 I tuoi turni aperti (max 20 più recenti):", reply_markup=PRIVATE_KB)
+    for sid, chat_id, message_id, date_iso, caption in rows:
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-        sent_mid = None
-        # 1) prova a copiare lo screenshot originale
         try:
-            res = await ctx.bot.copy_message(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
-            sent_mid = getattr(res, "message_id", None)
+            await ctx.bot.copy_message(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
         except Exception:
-            sent_mid = None
-        # 2) fallback con file_id
-        if sent_mid is None and file_id:
-            try:
-                m = await ctx.bot.send_photo(chat_id=user_id, photo=file_id)
-                sent_mid = m.message_id
-            except Exception:
-                pass
-        # 3) invia i bottoni (Risolto + Contatta autore) sotto
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Risolto", callback_data=f"CLOSE|{sid}")]])
-        # piccolo trucco: bottoni sotto uno screenshot copiato → invia messaggio “non vuoto” con NBSP
-        try:
-            await ctx.bot.send_message(chat_id=user_id, text="\u00A0", reply_markup=kb, reply_to_message_id=sent_mid or None)
-        except BadRequest:
-            await ctx.bot.send_message(chat_id=user_id, text="\u00A0", reply_markup=kb)
+            pass
+        await ctx.bot.send_message(
+            chat_id=user_id,
+            text=f"📅 {human}\n{caption or ''}".strip(),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{sid}"),
+                 InlineKeyboardButton("✅ Risolto", callback_data=f"CLOSE|{sid}")]
+            ])
+        )
 
 async def miei_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
@@ -479,7 +386,7 @@ async def miei_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: str):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("""SELECT id, chat_id, message_id, user_id, username, caption, photo_file_id
+    cur.execute("""SELECT id, chat_id, message_id, user_id, username, caption
                    FROM shifts
                    WHERE date_iso=? AND status='open'
                    ORDER BY created_at ASC""", (date_iso,))
@@ -497,48 +404,28 @@ async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: 
         reply_markup=PRIVATE_KB if update.effective_chat.type==ChatType.PRIVATE else None
     )
 
-    for (sid, chat_id, message_id, user_id, username, caption, file_id) in rows:
-        sent_mid = None
-        # 1) prova copia
+    for (sid, chat_id, message_id, user_id, username, caption) in rows:
         try:
-            res = await ctx.bot.copy_message(
+            await ctx.bot.copy_message(
                 chat_id=update.effective_chat.id,
                 from_chat_id=chat_id,
                 message_id=message_id
             )
-            sent_mid = getattr(res, "message_id", None)
         except Exception:
-            sent_mid = None
-        # 2) fallback con file_id
-        if sent_mid is None and file_id:
-            try:
-                m = await ctx.bot.send_photo(chat_id=update.effective_chat.id, photo=file_id)
-                sent_mid = m.message_id
-            except Exception:
-                sent_mid = None
+            pass
 
-        # 3) bottoni “Contatta autore” + (opzionale) “Profilo”
         btns = [
             InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{sid}"),
+            InlineKeyboardButton("✅ Risolto", callback_data=f"CLOSE|{sid}")
         ]
         if username and isinstance(username, str) and username.startswith("@") and len(username) > 1:
             handle = username[1:]
-            btns.append(InlineKeyboardButton("👤 Profilo autore", url=f"https://t.me/{handle}"))
+            btns.insert(1, InlineKeyboardButton("👤 Profilo autore", url=f"https://t.me/{handle}"))
 
-        # metti i bottoni sotto allo screenshot (messaggio separato con NBSP)
-        try:
-            await ctx.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="\u00A0",
-                reply_markup=InlineKeyboardMarkup([btns]),
-                reply_to_message_id=sent_mid or None
-            )
-        except BadRequest:
-            await ctx.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="\u00A0",
-                reply_markup=InlineKeyboardMarkup([btns])
-            )
+        txt = (caption or "").strip()
+        if txt:
+            await update.effective_message.reply_text(txt)
+        await update.effective_message.reply_text("Azioni:", reply_markup=InlineKeyboardMarkup([btns]))
 
 async def dates_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
@@ -614,7 +501,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     "owner_id": int(parts[4]),
                     "owner_username": "",
                     "caption": "",
-                    "file_id": None
                 }
             except Exception:
                 data = None
@@ -663,8 +549,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             user_id=owner_id,
             username=data.get("owner_username", ""),
             caption=data.get("caption", ""),
-            date_iso=date_iso,
-            file_id=data.get("file_id")
+            date_iso=date_iso
         )
 
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
@@ -682,48 +567,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "✅ Turno registrato. Per ricevere le conferme in privato, apri la chat con me:",
                 reply_markup=kb
             )
-        return
-
-    elif parts[0] == "SETDATEALBUM":
-        # formato: SETDATEALBUM|<media_group_id>|<YYYY-MM-DD>
-        if len(parts) < 3:
-            await query.edit_message_text("❌ Data non valida.")
-            return
-        gid = parts[1]
-        date_iso = parts[2]
-
-        g = MEDIA_GROUPS.get(gid)
-        if not g:
-            await query.edit_message_text("❌ Album non trovato.")
-            return
-
-        g["date"] = date_iso
-
-        # Salva TUTTE le foto accumulate per questo album
-        for p in list(g["photos"]):
-            await save_shift(p, date_iso)
-
-        # notifica una sola volta al proprietario
-        if not g["notified"]:
-            human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-            try:
-                await ctx.bot.send_message(chat_id=g["owner_id"], text=f"✅ Turno (album) registrato per il {human}", reply_markup=PRIVATE_KB)
-            except Exception:
-                pass
-            g["notified"] = True
-
-        # chiudi calendario
-        try:
-            if query.message:
-                await query.message.delete()
-        except Exception:
-            try:
-                await query.edit_message_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-
-        # pulizia memoria album
-        MEDIA_GROUPS.pop(gid, None)
         return
 
     elif parts[0] == "SEARCH":
@@ -747,13 +590,13 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("SELECT user_id, status, date_iso, chat_id, message_id FROM shifts WHERE id=?", (shift_id,))
+        cur.execute("SELECT user_id, status, date_iso FROM shifts WHERE id=?", (shift_id,))
         row = cur.fetchone()
         if not row:
             conn.close()
             await query.edit_message_text("❌ Turno non trovato (forse già rimosso).")
             return
-        owner_id, status, date_iso, src_chat_id, src_msg_id = row
+        owner_id, status, date_iso = row
 
         user = update.effective_user
         is_admin = await is_user_admin(update, ctx, user.id) if user else False
@@ -767,18 +610,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("ℹ️ Turno già segnato come risolto.")
             return
 
-        # elimina dal gruppo se possibile (potrebbe essere già cancellato)
-        try:
-            await ctx.bot.delete_message(chat_id=src_chat_id, message_id=src_msg_id)
-        except Exception:
-            pass
-
-        cur.execute("DELETE FROM shifts WHERE id=?", (shift_id,))
+        cur.execute("UPDATE shifts SET status='closed' WHERE id=?", (shift_id,))
         conn.commit()
         conn.close()
 
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-        await query.edit_message_text(f"✅ Turno segnato come *Risolto* e rimosso ({human}).", parse_mode="Markdown")
+        await query.edit_message_text(f"✅ Turno segnato come *Risolto* ({human}).", parse_mode="Markdown")
 
     elif parts[0] == "CONTACT":
         try:
@@ -863,7 +700,7 @@ def main():
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
     app.add_handler(CommandHandler("miei", miei_cmd), group=1)
 
-    # Foto/immagini: screenshot turni (foto + document image)
+    # Foto/immagini: screenshot turni
     img_doc_filter = filters.Document.IMAGE if hasattr(filters.Document, "IMAGE") else filters.Document.MimeType("image/")
     app.add_handler(MessageHandler(filters.PHOTO | img_doc_filter, photo_or_doc_image_handler), group=1)
 
