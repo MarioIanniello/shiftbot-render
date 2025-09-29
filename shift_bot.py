@@ -62,12 +62,11 @@ MEDIA_GROUPS: Dict[str, Dict[str, Any]] = {
 # ====== Tastiera persistente in DM ======
 PRIVATE_KB = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("/cerca")],
-        [KeyboardButton("/date"), KeyboardButton("/miei")],
+        [KeyboardButton("I miei turni")],            
+        [KeyboardButton("Cerca"), KeyboardButton("Date")]
     ],
     resize_keyboard=True,
-    is_persistent=True,
-    selective=True,
+    one_time_keyboard=False
 )
 
 # ============== DB ==============
