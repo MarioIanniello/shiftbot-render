@@ -857,6 +857,7 @@ def main():
     app.add_handler(CommandHandler("cerca", search_cmd), group=1)
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
     app.add_handler(CommandHandler("miei", miei_cmd), group=1)
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^I miei turni$"), miei_cmd), group=1)
 
     # Foto/immagini: screenshot turni (foto + document image)
     img_doc_filter = filters.Document.IMAGE if hasattr(filters.Document, "IMAGE") else filters.Document.MimeType("image/")
