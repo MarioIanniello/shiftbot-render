@@ -479,47 +479,57 @@ async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: 
     conn.close()
 
     if not rows:
-        await update.effective_message.reply_text("Nessun turno salvato per quella data.", reply_markup=PRIVATE_KB if update.effective_chat.type==ChatType.PRIVATE else None)
+        await update.effective_message.reply_text(
+            "Nessun turno salvato per quella data.",
+            reply_markup=PRIVATE_KB if update.effective_chat.type == ChatType.PRIVATE else None
+        )
         return
 
     human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
     await update.effective_message.reply_text(
         f"📅 Turni trovati per *{human}*: {len(rows)}",
         parse_mode="Markdown",
-        reply_markup=PRIVATE_KB if update.effective_chat.type==ChatType.PRIVATE else None
+        reply_markup=PRIVATE_KB if update.effective_chat.type == ChatType.PRIVATE else None
     )
 
-    for (sid, chat_id, message_id, user_id, username, caption, file_id) in rows:
-        # 1) prova copia
-        copied = True
+    for (sid, chat_id, message_id, _user_id, _username, _caption, file_id) in rows:
+        sent_mid = None
+
+        # 1) copia lo screenshot originale (con la sua didascalia già inclusa)
         try:
-            await ctx.bot.copy_message(
+            copied_msg = await ctx.bot.copy_message(
                 chat_id=update.effective_chat.id,
                 from_chat_id=chat_id,
                 message_id=message_id
             )
+            # in PTB v21 copy_message ritorna Message: prendi l'id
+            sent_mid = getattr(copied_msg, "message_id", None)
         except Exception:
-            copied = False
+            sent_mid = None
 
-        # 2) fallback con file_id
-        if not copied and file_id:
+        # 2) fallback con file_id se necessario
+        if sent_mid is None and file_id:
             try:
-                await ctx.bot.send_photo(chat_id=update.effective_chat.id, photo=file_id)
+                m = await ctx.bot.send_photo(chat_id=update.effective_chat.id, photo=file_id)
+                sent_mid = m.message_id
             except Exception:
-                pass
+                sent_mid = None
 
-        # bottoni sotto
-        btns = [
-            InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{sid}")
-        ]
-        if username and isinstance(username, str) and username.startswith("@") and len(username) > 1:
-            handle = username[1:]
-            btns.append(InlineKeyboardButton("👤 Profilo autore", url=f"https://t.me/{handle}"))
-
-        await update.effective_message.reply_text(
-            (caption or "").strip() or "—",
-            reply_markup=InlineKeyboardMarkup([btns])
-        )
+        # 3) invia SOLO il bottone "📩 Contatta autore" subito sotto allo screenshot
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{sid}")]])
+        # NBSP per avere un testo valido; rispondi in thread allo screenshot se possibile
+        text_nbsp = "\u00A0"
+        try:
+            await ctx.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=text_nbsp,
+                reply_markup=kb,
+                reply_to_message_id=sent_mid,
+                allow_sending_without_reply=True
+            )
+        except Exception:
+            # fallback senza reply
+            await ctx.bot.send_message(chat_id=update.effective_chat.id, text=text_nbsp, reply_markup=kb)
 
 async def dates_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
