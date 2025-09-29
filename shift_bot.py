@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni su Telegram
-Versione: 3.9.1
+Versione: 3.9.2
 """
 
 import os
@@ -23,19 +23,19 @@ from telegram.ext import (
     ApplicationHandlerStop
 )
 
-VERSION = "ShiftBot 3.9.1"
+VERSION = "ShiftBot 3.9.2"
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
 WELCOME_TEXT = (
-    "👋 Benvenuto/a nel gruppo *Cambi Servizi*!\n\n"
+    "👋 Benvenuto/a nel gruppo <b>Cambi Servizi</b>!\n\n"
     "Per caricare i turni:\n"
     "• Invia l’immagine del turno con una breve descrizione "
-    "(es. *Cambio per mattina*, *Cambio per intermedia*, *Cambio per pomeriggio*)\n\n"
+    "(es. <i>Cambio per mattina</i>, <i>Cambio per intermedia</i>, <i>Cambio per pomeriggio</i>)\n\n"
     "Per cercare i turni:\n"
-    "• Digita i comandi in *privato* con il bot:\n"
-    "   `/cerca`, `/date`, `/miei`\n"
-    "• `/version` (solo admin nel gruppo)\n"
+    "• Digita i comandi in <b>privato</b> con il bot:\n"
+    "   <code>/cerca</code>, <code>/date</code>, <code>/miei</code>\n"
+    "• <code>/version</code> (solo admin nel gruppo)\n"
 )
 
 DATE_PATTERNS = [
@@ -114,17 +114,23 @@ def mention_html(user_id: Optional[int], username: Optional[str]) -> str:
         return f'<a href="tg://user?id={user_id}">utente</a>'
     return "utente"
 
-def contact_buttons(shift_id: int, owner_username: Optional[str]) -> InlineKeyboardMarkup:
-    row = [InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{shift_id}")]
+def contact_buttons(shift_id: int, owner_username: Optional[str], owner_id: Optional[int]) -> InlineKeyboardMarkup:
+    # Usa username se disponibile, altrimenti link via user-id
     if owner_username and owner_username.startswith("@") and len(owner_username) > 1:
-        handle = owner_username[1:]
-        row.append(InlineKeyboardButton("👤 Profilo autore", url=f"https://t.me/{handle}"))
+        open_chat_btn = InlineKeyboardButton("💬 Apri chat con autore", url=f"https://t.me/{owner_username[1:]}")
+    else:
+        open_chat_btn = InlineKeyboardButton("💬 Apri chat con autore", url=f"tg://user?id={owner_id}")
+    row = [
+        InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{shift_id}"),
+        open_chat_btn,
+        InlineKeyboardButton("✅ Risolto", callback_data=f"CLOSE|{shift_id}")
+    ]
     return InlineKeyboardMarkup([row])
 
 async def dm_or_prompt_private(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, group_message: Message, text: str):
     """Prova DM; altrimenti in gruppo mostra bottone per aprire DM."""
     try:
-        await ctx.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown", reply_markup=PRIVATE_KB)
+        await ctx.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=PRIVATE_KB)
     except Forbidden:
         bot_username = ctx.bot.username or "this_bot"
         url = f"https://t.me/{bot_username}?start=start"
@@ -200,7 +206,7 @@ async def group_command_guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
             await dm_or_prompt_private(
                 ctx, user.id, msg,
-                "ℹ️ Nel gruppo solo gli *admin* possono usare /start e /version.\n"
+                "ℹ️ Nel gruppo solo gli <b>admin</b> possono usare /start e /version.\n"
                 "Per le ricerche usa i pulsanti in privato."
             )
             raise ApplicationHandlerStop()
@@ -218,12 +224,12 @@ async def group_command_guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         await ctx.bot.send_message(
             chat_id=user.id,
-            text=("🛡️ I comandi vanno usati in *privato*.\n\n"
+            text=("🛡️ I comandi vanno usati in <b>privato</b>.\n\n"
                   "Apri la chat con me e usa:\n"
-                  "• /cerca → calendario e ricerca\n"
-                  "• /date → elenco date\n"
-                  "• /miei → i tuoi turni\n"),
-            parse_mode="Markdown",
+                  "• <code>/cerca</code> → calendario e ricerca\n"
+                  "• <code>/date</code> → elenco date\n"
+                  "• <code>/miei</code> → i tuoi turni\n"),
+            parse_mode="HTML",
             reply_markup=PRIVATE_KB
         )
         await ctx.bot.send_message(chat_id=user.id, text="Apri qui la chat privata:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata", url=url)]]))
@@ -262,14 +268,14 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await ensure_private_menu(ctx, update.effective_chat.id)
                 return
 
-        await update.effective_message.reply_text(WELCOME_TEXT, parse_mode="Markdown", reply_markup=PRIVATE_KB)
+        await update.effective_message.reply_text(WELCOME_TEXT, parse_mode="HTML", reply_markup=PRIVATE_KB)
         return
 
-    await update.effective_message.reply_text(WELCOME_TEXT, parse_mode="Markdown")
+    await update.effective_message.reply_text(WELCOME_TEXT, parse_mode="HTML")
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == ChatType.PRIVATE:
-        await update.effective_message.reply_text(WELCOME_TEXT, parse_mode="Markdown", reply_markup=PRIVATE_KB)
+        await update.effective_message.reply_text(WELCOME_TEXT, parse_mode="HTML", reply_markup=PRIVATE_KB)
 
 async def version_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(VERSION)
@@ -282,7 +288,7 @@ async def welcome_new_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         return
     if old in ("left", "kicked") and new in ("member", "restricted"):
-        await ctx.bot.send_message(chat_id=chm.chat.id, text=WELCOME_TEXT, parse_mode="Markdown")
+        await ctx.bot.send_message(chat_id=chm.chat.id, text=WELCOME_TEXT, parse_mode="HTML")
 
 # ============== FOTO/DOC (invio turno + album) ==============
 async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -316,17 +322,16 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
         if (not g["date"]) and date_iso:
             g["date"] = date_iso
 
-        # Se abbiamo già una data e non abbiamo ancora preso una decisione su duplicati
+        # Decisione duplicati su album
         if g["date"] and g["decision"] is None:
             if owner_id and has_open_on_date(owner_id, g["date"]):
                 g["decision"] = "blocked"
                 human = datetime.strptime(g["date"], "%Y-%m-%d").strftime("%d/%m/%Y")
                 await dm_or_prompt_private(
                     ctx, owner_id, msg,
-                    f"⛔ Hai già un turno *aperto* per il {human}.\n"
-                    f"Chiudi quello esistente con *Risolto* oppure usa /miei per gestirli."
+                    f"⛔ Hai già un turno <b>aperto</b> per il {human}.\n"
+                    f"Chiudi quello esistente con <b>Risolto</b> oppure usa /miei per gestirli."
                 )
-                # elimina tutte le foto già arrivate dell'album
                 for p in list(g["photos"]):
                     try:
                         await ctx.bot.delete_message(chat_id=p.chat.id, message_id=p.message_id)
@@ -340,14 +345,14 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
                     await dm_or_prompt_private(ctx, owner_id, msg, f"✅ Turno (album) registrato per il {human}")
                     g["notified"] = True
 
-        # Se non abbiamo la data, mostra un SOLO calendario alla prima foto
+        # Primo messaggio album senza data → mostra UN calendario
         if not g["date"] and len(g["photos"]) == 1:
             kb = build_calendar(datetime.today(), mode=f"SETDATEALBUM|{gid}")
             cal = await msg.reply_text("📅 Seleziona la data per questo turno (album):", reply_markup=kb)
             PENDING[cal.message_id] = {"album_id": gid}
             return
 
-        # Se la data esiste ed è permesso, salva questa foto
+        # Se data ok → salva ogni foto
         if g["date"] and g["decision"] == "allowed":
             await save_shift(msg, g["date"])
         return
@@ -370,8 +375,8 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         await dm_or_prompt_private(
             ctx, owner_id, msg,
-            f"⛔ Hai già un turno *aperto* per il {human}.\n"
-            f"Chiudi quello esistente con *Risolto* oppure usa /miei per gestirli."
+            f"⛔ Hai già un turno <b>aperto</b> per il {human}.\n"
+            f"Chiudi quello esistente con <b>Risolto</b> oppure usa /miei per gestirli."
         )
         try:
             await ctx.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
@@ -420,20 +425,25 @@ async def miei_list_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int):
         return
 
     await ctx.bot.send_message(chat_id=user_id, text="🧾 I tuoi turni aperti (max 20 più recenti):", reply_markup=PRIVATE_KB)
-    for sid, chat_id, message_id, date_iso, _caption in rows:
-        human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-        try:
-            await ctx.bot.copy_message(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
-        except Exception:
-            pass
-        # Solo pulsanti, nessuna ripetizione di caption
+
+    for sid, src_chat_id, src_msg_id, date_iso, _caption in rows:
+        # 1) copia lo screenshot nel DM
+        copy_res = await ctx.bot.copy_message(
+            chat_id=user_id,
+            from_chat_id=src_chat_id,
+            message_id=src_msg_id
+        )
+        copied_mid = getattr(copy_res, "message_id", copy_res)
+
+        # 2) rispondi a QUEL messaggio con il pulsante ✅ Risolto
         await ctx.bot.send_message(
             chat_id=user_id,
             text="\u200B",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{sid}"),
-                 InlineKeyboardButton("✅ Risolto", callback_data=f"CLOSE|{sid}")]
-            ])
+                [InlineKeyboardButton("✅ Risolto", callback_data=f"CLOSE|{sid}")]
+            ]),
+            reply_to_message_id=copied_mid,
+            allow_sending_without_reply=True
         )
 
 async def miei_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -464,8 +474,8 @@ async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: 
 
     human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
     await update.effective_message.reply_text(
-        f"📅 Turni trovati per *{human}*: {len(rows)}",
-        parse_mode="Markdown",
+        f"📅 Turni trovati per <b>{human}</b>: {len(rows)}",
+        parse_mode="HTML",
         reply_markup=PRIVATE_KB if update.effective_chat.type == ChatType.PRIVATE else None
     )
 
@@ -479,16 +489,9 @@ async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: 
         except Exception:
             pass
 
-        btns = [
-            InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{sid}"),
-            InlineKeyboardButton("✅ Risolto", callback_data=f"CLOSE|{sid}")
-        ]
-        if username and isinstance(username, str) and username.startswith("@") and len(username) > 1:
-            handle = username[1:]
-            btns.insert(1, InlineKeyboardButton("👤 Profilo autore", url=f"https://t.me/{handle}"))
-
-        # Solo pulsanti (niente "Azioni:" e niente caption)
-        await update.effective_message.reply_text("\u200B", reply_markup=InlineKeyboardMarkup([btns]))
+        # Bottoni: Contatta + Apri chat + Risolto
+        kb = contact_buttons(shift_id=sid, owner_username=username, owner_id=_user_id)
+        await update.effective_message.reply_text("\u200B", reply_markup=kb)
 
 async def dates_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
@@ -505,11 +508,11 @@ async def dates_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("Non ci sono turni aperti al momento.", reply_markup=PRIVATE_KB)
         return
 
-    lines = ["📆 *Date con turni aperti:*", ""]
+    lines = ["📆 <b>Date con turni aperti:</b>", ""]
     for date_iso, count in rows:
         d = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         lines.append(f"• {d}: {count}")
-    await update.effective_message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=PRIVATE_KB)
+    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML", reply_markup=PRIVATE_KB)
 
 # ============== CALENDARIO INLINE ==============
 def build_calendar(base_date: datetime, mode="SETDATE", extra="") -> InlineKeyboardMarkup:
@@ -578,9 +581,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try:
                 await ctx.bot.send_message(
                     chat_id=owner_id,
-                    text=(f"⛔ Hai già un turno *aperto* per il {human}.\n"
-                          f"Chiudi quello esistente con *Risolto* oppure usa /miei per gestirli."),
-                    parse_mode="Markdown",
+                    text=(f"⛔ Hai già un turno <b>aperto</b> per il {human}.\n"
+                          f"Chiudi quello esistente con <b>Risolto</b> oppure usa /miei per gestirli."),
+                    parse_mode="HTML",
                     reply_markup=PRIVATE_KB
                 )
                 try:
@@ -600,9 +603,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
                 await query.edit_message_text(
-                    f"⛔ Questo turno non è stato salvato: c'è già un tuo turno *aperto* per quella data.\n"
-                    f"Apri la chat privata per i dettagli.",
-                    reply_markup=kb, parse_mode="Markdown"
+                    ("⛔ Questo turno non è stato salvato: c'è già un tuo turno <b>aperto</b> per quella data.\n"
+                     "Apri la chat privata per i dettagli."),
+                    reply_markup=kb, parse_mode="HTML"
                 )
             return
 
@@ -654,9 +657,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try:
                 await ctx.bot.send_message(
                     chat_id=owner_id,
-                    text=(f"⛔ Hai già un turno *aperto* per il {human}.\n"
-                          f"Chiudi quello esistente con *Risolto* oppure usa /miei per gestirli."),
-                    parse_mode="Markdown",
+                    text=(f"⛔ Hai già un turno <b>aperto</b> per il {human}.\n"
+                          f"Chiudi quello esistente con <b>Risolto</b> oppure usa /miei per gestirli."),
+                    parse_mode="HTML",
                     reply_markup=PRIVATE_KB
                 )
             except Exception:
@@ -673,7 +676,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         g["decision"] = "allowed"
-        # salva tutte le foto ricevute finora
         for p in list(g["photos"]):
             await save_shift(p, date_iso)
         if not g["notified"]:
@@ -736,17 +738,16 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-        await query.edit_message_text(f"✅ Turno segnato come *Risolto* ({human}).", parse_mode="Markdown")
+        await query.edit_message_text(f"✅ Turno segnato come <b>Risolto</b> ({human}).", parse_mode="HTML")
 
     elif parts[0] == "CONTACT":
-        # Nuovo flusso: invia screenshot in DM al richiedente + bottone per aprire chat con autore + messaggio pronto
+        # Nuovo flusso: screenshot in DM al richiedente + bottone apri chat + messaggio pronto
         try:
             shift_id = int(parts[1])
         except Exception:
             await query.answer("ID turno non valido.", show_alert=True)
             return
 
-        # recupero dati del turno
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("""SELECT chat_id, message_id, user_id, username, date_iso
@@ -764,7 +765,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.answer("Errore utente.", show_alert=True)
             return
 
-        # 1) Mando lo screenshot in PRIVATO al richiedente
+        # 1) Screenshot in PRIVATO al richiedente
         try:
             await ctx.bot.copy_message(
                 chat_id=requester.id,
@@ -772,7 +773,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 message_id=src_msg_id
             )
         except Forbidden:
-            # l’utente non ha ancora avviato il bot in DM
             bot_username = ctx.bot.username or "this_bot"
             url_bot = f"https://t.me/{bot_username}?start=start"
             kb_dm = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat con il bot", url=url_bot)]])
@@ -782,30 +782,26 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # 2) Costruisco il link per APRIRE LA CHAT con l’autore
+        # 2) Link per APRIRE LA CHAT con l’autore
         if owner_username and isinstance(owner_username, str) and owner_username.startswith("@") and len(owner_username) > 1:
             url_author = f"https://t.me/{owner_username[1:]}"
             label = f"Apri chat con {owner_username}"
         else:
-            # fallback senza username (apre il profilo tramite user id)
             url_author = f"tg://user?id={owner_id}"
             label = "Apri chat con l’autore"
 
-        # 3) Messaggio pronto da usare
+        # 3) Messaggio pronto
         prompt = "Ciao 👋 , questo servizio è ancora disponibile ?"
 
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"💬 {label}", url=url_author)]])
         await ctx.bot.send_message(
             chat_id=requester.id,
-            text=(
-                "Tocca il pulsante per aprire la chat con l’autore.\n"
-                "Poi incolla questo messaggio:\n\n"
-                f"{prompt}"
-            ),
-            reply_markup=kb
+            text=("Tocca il pulsante per aprire la chat con l’autore.\n"
+                  "Poi incolla questo messaggio:\n\n"
+                  f"{prompt}")
+            , reply_markup=kb
         )
 
-        # piccolo feedback nel gruppo
         await query.message.reply_text("✅ Ti ho inviato in privato lo screenshot e il pulsante per scrivere all’autore.")
 
 # ============== DM TEXT ROUTER ==============
