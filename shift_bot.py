@@ -492,41 +492,50 @@ async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: 
         reply_markup=PRIVATE_KB if update.effective_chat.type == ChatType.PRIVATE else None
     )
 
-    for (sid, chat_id, message_id, _user_id, _username, _caption, file_id) in rows:
-        sent_mid = None
+        for (sid, chat_id, message_id, _user_id, _username, _caption, file_id) in rows:
+        # tastiera: SOLO "Contatta autore"
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{sid}")]]
+        )
 
-        # 1) copia lo screenshot originale (con la sua didascalia già inclusa)
+        # 1) prova a COPIARE lo screenshot e poi aggiungi i bottoni editando la reply_markup
+        sent_mid = None
         try:
-            copied_msg = await ctx.bot.copy_message(
+            copied = await ctx.bot.copy_message(
                 chat_id=update.effective_chat.id,
                 from_chat_id=chat_id,
                 message_id=message_id
             )
-            # in PTB v21 copy_message ritorna Message: prendi l'id
-            sent_mid = getattr(copied_msg, "message_id", None)
+            # PTB 21.x ritorna Message
+            sent_mid = getattr(copied, "message_id", None)
+            if sent_mid:
+                await ctx.bot.edit_message_reply_markup(
+                    chat_id=update.effective_chat.id,
+                    message_id=sent_mid,
+                    reply_markup=kb
+                )
+                continue  # fatto! passa al prossimo risultato
         except Exception:
-            sent_mid = None
+            sent_mid = None  # passa al fallback
 
-        # 2) fallback con file_id se necessario
-        if sent_mid is None and file_id:
+        # 2) fallback con file_id: invia la foto già con la tastiera
+        if file_id:
             try:
-                m = await ctx.bot.send_photo(chat_id=update.effective_chat.id, photo=file_id)
-                sent_mid = m.message_id
+                await ctx.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=file_id,
+                    reply_markup=kb
+                )
+                continue
             except Exception:
-                sent_mid = None
+                pass
 
-        # 3) invia SOLO il bottone "📩 Contatta autore" subito sotto allo screenshot
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{sid}")]])
-        # NBSP per avere un testo valido; rispondi in thread allo screenshot se possibile
-        text_nbsp = "\u00A0"
-        try:
-            await ctx.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=text_nbsp,
-                reply_markup=kb,
-                reply_to_message_id=sent_mid,
-                allow_sending_without_reply=True
-            )
+        # 3) ultimo fallback: messaggio testuale (senza immagine) con bottoni
+        await ctx.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="(Immagine non disponibile)",
+            reply_markup=kb
+        )
         except Exception:
             # fallback senza reply
             await ctx.bot.send_message(chat_id=update.effective_chat.id, text=text_nbsp, reply_markup=kb)
