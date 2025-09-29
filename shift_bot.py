@@ -60,6 +60,8 @@ MEDIA_GROUPS: Dict[str, Dict[str, Any]] = {
 }
 
 # ====== Tastiera persistente in DM ======
+from telegram import ReplyKeyboardMarkup, KeyboardButton
+
 PRIVATE_KB = ReplyKeyboardMarkup(
     [
         [KeyboardButton("I miei turni")],            
