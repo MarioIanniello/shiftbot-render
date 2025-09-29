@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni (Telegram)
-Versione: 4.1
+Versione: 4.2
 """
 
 import os
@@ -16,7 +16,7 @@ from telegram import (
     ReplyKeyboardMarkup, KeyboardButton
 )
 from telegram.constants import ChatType
-from telegram.error import Forbidden
+from telegram.error import Forbidden, BadRequest
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ContextTypes, filters, CallbackQueryHandler, ChatMemberHandler,
@@ -24,7 +24,7 @@ from telegram.ext import (
 )
 
 # ====== Config ======
-VERSION = "ShiftBot 4.1"
+VERSION = "ShiftBot 4.2"
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
@@ -103,7 +103,7 @@ async def is_user_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE, user_id:
         return False
 
 def contact_only_buttons(shift_id: int) -> InlineKeyboardMarkup:
-    # Solo un bottone per /cerca, come richiesto
+    # Bottone unico per /cerca
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{shift_id}")
     ]])
@@ -147,7 +147,7 @@ async def save_shift(msg: Message, date_iso: str) -> int:
     if msg.from_user:
         username = f"@{msg.from_user.username}" if msg.from_user.username else msg.from_user.full_name
 
-    # Salva file_id per fallback (gruppi con "impedisci salvataggio contenuti")
+    # Salva file_id per fallback
     file_id = None
     if msg.photo:
         file_id = msg.photo[-1].file_id
@@ -169,6 +169,26 @@ async def ensure_private_menu(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, text
         await ctx.bot.send_message(chat_id=chat_id, text=text or "Scegli un’azione:", reply_markup=PRIVATE_KB)
     except Exception:
         pass
+
+# Invia bottoni sotto un messaggio, con fallback
+async def send_buttons_below(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, replied_mid: Optional[int], markup: InlineKeyboardMarkup):
+    text = "⬇️"  # testo non vuoto
+    if replied_mid:
+        try:
+            await ctx.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=markup,
+                reply_to_message_id=replied_mid,
+                allow_sending_without_reply=True
+            )
+            return
+        except BadRequest:
+            pass
+        except Exception:
+            pass
+    # Fallback: senza reply
+    await ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
 
 # ============== GUARD COMANDI IN GRUPPO ==============
 async def group_command_guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -404,14 +424,9 @@ async def miei_list_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int):
             m = await ctx.bot.send_message(chat_id=user_id, text=f"📄 Turno del {human}\n(Immagine non disponibile)")
             sent_mid = m.message_id
 
-        # bottoni sotto allo screenshot: SOLO ✅ Risolto
-        await ctx.bot.send_message(
-            chat_id=user_id,
-            text="\u200B",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Risolto", callback_data=f"CLOSE|{sid}")]]),
-            reply_to_message_id=sent_mid,
-            allow_sending_without_reply=True
-        )
+        # bottoni sotto allo screenshot: SOLO ✅ Risolto (in reply, con fallback)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Risolto", callback_data=f"CLOSE|{sid}")]])
+        await send_buttons_below(ctx, user_id, sent_mid, kb)
 
 async def miei_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
@@ -443,23 +458,30 @@ async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: 
     )
 
     for (sid, chat_id, message_id, _user_id, username, _caption, file_id) in rows:
-        sent_ok = False
-        # tenta copia
+        sent_mid = None
+
+        # 1) prova copia
         try:
-            await ctx.bot.copy_message(chat_id=update.effective_chat.id, from_chat_id=chat_id, message_id=message_id)
-            sent_ok = True
+            copy_res = await ctx.bot.copy_message(
+                chat_id=update.effective_chat.id,
+                from_chat_id=chat_id,
+                message_id=message_id
+            )
+            sent_mid = getattr(copy_res, "message_id", copy_res)
         except Exception:
-            sent_ok = False
-        # fallback con file_id
-        if not sent_ok and file_id:
+            sent_mid = None
+
+        # 2) fallback con file_id
+        if sent_mid is None and file_id:
             try:
-                await ctx.bot.send_photo(chat_id=update.effective_chat.id, photo=file_id)
-                sent_ok = True
+                m = await ctx.bot.send_photo(chat_id=update.effective_chat.id, photo=file_id)
+                sent_mid = m.message_id
             except Exception:
-                sent_ok = False
-        # bottoni sotto: SOLO "📩 Contatta autore"
+                sent_mid = None
+
+        # 3) bottoni: SOLO “📩 Contatta autore” sotto all’immagine (con fallback)
         kb = contact_only_buttons(shift_id=sid)
-        await update.effective_message.reply_text("\u200B", reply_markup=kb)
+        await send_buttons_below(ctx, update.effective_chat.id, sent_mid, kb)
 
 async def dates_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
