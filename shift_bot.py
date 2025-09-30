@@ -591,8 +591,8 @@ def build_calendar(base_date: datetime, mode="SETDATE", extra="") -> InlineKeybo
         keyboard.append(week)
 
     keyboard.append([
-        InlineKeyboardButton("<", callback_data=f"NAV|{mode}|{prev_month.strftime('%Y-%m-%d')}|"),
-        InlineKeyboardButton(">", callback_data=f"NAV|{mode}|{next_month.strftime('%Y-%m-%d')}|")
+        InlineKeyboardButton("<", callback_data=f"NAV|{mode}|{prev_month.strftime('%Y-%m-%d')}"),
+        InlineKeyboardButton(">", callback_data=f"NAV|{mode}|{next_month.strftime('%Y-%m-%d')}")
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -755,6 +755,11 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception: await query.edit_message_reply_markup(reply_markup=None)
         MEDIA_GROUPS.pop(gid, None)
         return
+    elif parts[0] == "IMPORTCAL":
+        date_iso = parts[1]
+    # qui avvii l’import della data scelta
+        await import_for_date(update, ctx, date_iso)  # o la tua funzione equivalente
+        await query.edit_message_text(f"📦 Import in corso per {datetime.strptime(date_iso,'%Y-%m-%d').strftime('%d/%m/%Y')}")
 
     elif parts[0] == "IMPORTSET":
         if len(parts) < 5:
@@ -792,8 +797,11 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"📅 Risultati mostrati per {datetime.strptime(date_iso, '%Y-%m-%d').strftime('%d/%m/%Y')}")
 
     elif parts[0] == "NAV":
+    # parts = ["NAV", <mode>, <yyyy-mm-01>]  (senza pipe finale)
         mode = parts[1]
-        new_month = datetime.strptime(parts[2], "%Y-%m-%d")
+    # prendi SEMPRE l'ultimo pezzo come data, indipendentemente dalla lunghezza
+        new_month_str = parts[-1]
+        new_month = datetime.strptime(new_month_str, "%Y-%m-%d")
         kb = build_calendar(new_month, mode)
         await query.edit_message_reply_markup(reply_markup=kb)
 
