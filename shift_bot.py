@@ -701,16 +701,19 @@ async def import_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("📅 Seleziona la data per questo turno:", reply_markup=kb)
 
 # -------------------- Callback inline --------------------
+# -------------------- Callback inline --------------------
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     parts = (query.data or "").split("|")
 
+    # ----- SETDATE (singola immagine) -----
     if parts[0] == "SETDATE":
         date_iso = parts[1]
         cal_msg_id = query.message.message_id if query.message else None
         data = PENDING.pop(cal_msg_id, None)
 
+        # fallback: dati passati direttamente nel callback
         if (not data) and len(parts) >= 5:
             try:
                 data = {
@@ -719,7 +722,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     "owner_id": int(parts[4]),
                     "owner_username": "",
                     "caption": "",
-                    "file_id": None
+                    "file_id": None,
                 }
             except Exception:
                 data = None
@@ -739,19 +742,26 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown",
                     reply_markup=PRIVATE_KB
                 )
-                try: await ctx.bot.delete_message(data["src_chat_id"], data["src_msg_id"])
-                except Exception: pass
-                try: await query.message.delete()
-                except Exception: await query.edit_message_reply_markup(reply_markup=None)
+                try:
+                    await ctx.bot.delete_message(data["src_chat_id"], data["src_msg_id"])
+                except Exception:
+                    pass
+                try:
+                    await query.message.delete()
+                except Exception:
+                    await query.edit_message_reply_markup(reply_markup=None)
             except Forbidden:
                 bot_username = ctx.bot.username or "this_bot"
                 url = f"https://t.me/{bot_username}?start=start"
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata con il bot", url=url)]])
-                try: await ctx.bot.delete_message(data["src_chat_id"], data["src_msg_id"])
-                except Exception: pass
+                try:
+                    await ctx.bot.delete_message(data["src_chat_id"], data["src_msg_id"])
+                except Exception:
+                    pass
                 await query.edit_message_text(
                     "⛔ Già presente un tuo turno aperto per quella data.\nApri la chat privata per i dettagli.",
-                    reply_markup=kb, parse_mode="Markdown"
+                    reply_markup=kb,
+                    parse_mode="Markdown"
                 )
             return
 
@@ -762,14 +772,16 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             username=data.get("owner_username", ""),
             caption=data.get("caption", ""),
             date_iso=date_iso,
-            file_id=data.get("file_id")
+            file_id=data.get("file_id"),
         )
 
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         try:
             await ctx.bot.send_message(chat_id=owner_id, text=f"✅ Turno registrato per il {human}", reply_markup=PRIVATE_KB)
-            try: await query.message.delete()
-            except Exception: await query.edit_message_reply_markup(reply_markup=None)
+            try:
+                await query.message.delete()
+            except Exception:
+                await query.edit_message_reply_markup(reply_markup=None)
         except Forbidden:
             bot_username = ctx.bot.username or "this_bot"
             url = f"https://t.me/{bot_username}?start=start"
@@ -777,146 +789,181 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("✅ Turno registrato. Per conferme, apri la chat con me:", reply_markup=kb)
         return
 
+    # ----- SETDATEALBUM (album) -----
     elif parts[0] == "SETDATEALBUM":
         if len(parts) < 3:
-            await query.edit_message_text("❌ Data non valida."); return
-        gid = parts[1]; date_iso = parts[2]
+            await query.edit_message_text("❌ Data non valida.")
+            return
+        gid = parts[1]
+        date_iso = parts[2]
+
         g = MEDIA_GROUPS.get(gid)
         if not g:
-            await query.edit_message_text("❌ Album non trovato."); return
+            await query.edit_message_text("❌ Album non trovato.")
+            return
 
         g["date"] = date_iso
         for p in list(g["photos"]):
             await save_shift(p, date_iso)
+
         if not g["notified"]:
             human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-            try: await ctx.bot.send_message(chat_id=g["owner_id"], text=f"✅ Turno (album) registrato per il {human}", reply_markup=PRIVATE_KB)
-            except Exception: pass
-            g["notified"] = True
-
-        try: await query.message.delete()
-        except Exception: await query.edit_message_reply_markup(reply_markup=None)
-        MEDIA_GROUPS.pop(gid, None)
-        return
-    
-
-    elif parts[0] == "IMPORTSET":
-    # Due formati:
-    # A) IMPORTSET|YYYY-MM-DD                     (gruppo, usa PENDING)
-    # B) IMPORTSET|<src_chat_id>|<src_msg_id>|<requester_id>|YYYY-MM-DD  (DM/inoltro)
-    if len(parts) == 2:
-        # --- Formato A: usa i dati salvati in PENDING con la msg_id del calendario ---
-        date_iso = parts[1]
-        cal_msg_id = query.message.message_id if query.message else None
-        data = PENDING.pop(cal_msg_id, None)
-        if not data:
-            await query.edit_message_text("❌ Non riesco a collegare il calendario al messaggio originale.")
-            return
-
-        save_shift_raw(
-            chat_id=data["src_chat_id"],
-            message_id=data["src_msg_id"],
-            user_id=data.get("owner_id"),
-            username=data.get("owner_username", ""),
-            caption=data.get("caption", ""),
-            date_iso=date_iso,
-            file_id=data.get("file_id"),
-        )
-
-        human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-        try:
-            await query.edit_message_text(f"✅ Importato per il {human}.")
-        except Exception:
-            # in caso di impossibilità a editare, almeno togli la tastiera
             try:
-                await query.edit_message_reply_markup(reply_markup=None)
+                await ctx.bot.send_message(chat_id=g["owner_id"], text=f"✅ Turno (album) registrato per il {human}", reply_markup=PRIVATE_KB)
             except Exception:
                 pass
+            g["notified"] = True
+
+        try:
+            await query.message.delete()
+        except Exception:
+            await query.edit_message_reply_markup(reply_markup=None)
+
+        MEDIA_GROUPS.pop(gid, None)
         return
 
-    elif len(parts) >= 5:
-        # --- Formato B: parametri completi nel callback (DM/inoltro) ---
-        try:
-            src_chat_id = int(parts[1])
-            src_msg_id  = int(parts[2])
-            date_iso    = parts[4]
-        except Exception:
-            await query.edit_message_text("❌ Parametri non validi.")
+    # ----- IMPORTSET (calendario di /import) -----
+    elif parts[0] == "IMPORTSET":
+        # Due formati supportati:
+        # A) IMPORTSET|YYYY-MM-DD
+        #    (GRUPPO: usa PENDING agganciato al messaggio del calendario)
+        # B) IMPORTSET|<src_chat_id>|<src_msg_id>|<requester_id>|YYYY-MM-DD
+        #    (DM/inoltro: parametri completi nel callback)
+
+        if len(parts) == 2:
+            # --- Formato A: gruppo + PENDING ---
+            date_iso = parts[1]
+            cal_msg_id = query.message.message_id if query.message else None
+            data = PENDING.pop(cal_msg_id, None)
+            if not data:
+                await query.edit_message_text("❌ Non riesco a collegare il calendario al messaggio originale.")
+                return
+
+            save_shift_raw(
+                chat_id=data["src_chat_id"],
+                message_id=data["src_msg_id"],
+                user_id=data.get("owner_id"),
+                username=data.get("owner_username", ""),
+                caption=data.get("caption", ""),
+                date_iso=date_iso,
+                file_id=data.get("file_id"),
+            )
+
+            human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+            try:
+                await query.edit_message_text(f"✅ Importato per il {human}.")
+            except Exception:
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
             return
 
-        class _Fake: pass
-        fake = _Fake()
-        fake.chat = _Fake(); fake.chat.id = src_chat_id
-        fake.message_id = src_msg_id
-        fake.caption = ""
-        fake.from_user = None
-        fake.photo = None
-        fake.document = None
+        elif len(parts) >= 5:
+            # --- Formato B: DM/inoltro ---
+            try:
+                src_chat_id = int(parts[1])
+                src_msg_id = int(parts[2])
+                date_iso = parts[4]
+            except Exception:
+                await query.edit_message_text("❌ Parametri non validi.")
+                return
 
-        new_id = await _save_import_from_message(ctx, fake, date_iso)
-        if new_id == -1:
-            await query.edit_message_text("Era già stato importato.")
-        elif new_id:
-            human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-            await query.edit_message_text(f"✅ Importato per il {human}.")
+            class _Fake:
+                pass
+
+            fake = _Fake()
+            fake.chat = _Fake()
+            fake.chat.id = src_chat_id
+            fake.message_id = src_msg_id
+            fake.caption = ""
+            fake.from_user = None
+            fake.photo = None
+            fake.document = None
+
+            new_id = await _save_import_from_message(ctx, fake, date_iso)
+            if new_id == -1:
+                await query.edit_message_text("Era già stato importato.")
+            elif new_id:
+                human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+                await query.edit_message_text(f"✅ Importato per il {human}.")
+            else:
+                await query.edit_message_text("Non sono riuscito a importare.")
+            return
+
         else:
-            await query.edit_message_text("Non sono riuscito a importare.")
-        return
+            await query.answer()
+            return
 
-    else:
-        # Callback malformato
-        await query.answer()
-        return
-
+    # ----- SEARCH (dal calendario di ricerca) -----
     elif parts[0] == "SEARCH":
         date_iso = parts[1]
         fake_update = Update(update.update_id, message=query.message)
         await show_shifts(fake_update, ctx, date_iso)
-        await query.edit_message_text(f"📅 Risultati mostrati per {datetime.strptime(date_iso, '%Y-%m-%d').strftime('%d/%m/%Y')}")
+        await query.edit_message_text(
+            f"📅 Risultati mostrati per {datetime.strptime(date_iso, '%Y-%m-%d').strftime('%d/%m/%Y')}"
+        )
+        return
 
+    # ----- NAV (navigazione mese calendario) -----
     elif parts[0] == "NAV":
-    # parts: ["NAV", "<MODE>", "YYYY-MM-DD"]
+        # parts: ["NAV", "<MODE>", "YYYY-MM-DD"]
         mode = parts[1]
         new_month = datetime.strptime(parts[2], "%Y-%m-%d")
         kb = build_calendar(new_month, mode)
         await query.edit_message_reply_markup(reply_markup=kb)
+        return
 
+    # ----- CLOSE -----
     elif parts[0] == "CLOSE":
         try:
             shift_id = int(parts[1])
         except Exception:
-            await query.edit_message_text("❌ ID turno non valido."); return
+            await query.edit_message_text("❌ ID turno non valido.")
+            return
 
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("SELECT user_id, status, date_iso, chat_id, message_id FROM shifts WHERE id=?", (shift_id,))
         row = cur.fetchone()
         if not row:
-            conn.close(); await query.edit_message_text("❌ Turno non trovato (forse già rimosso)."); return
+            conn.close()
+            await query.edit_message_text("❌ Turno non trovato (forse già rimosso).")
+            return
         owner_id, status, date_iso, src_chat_id, src_msg_id = row
 
         user = update.effective_user
         is_admin = await is_user_admin(update, ctx, user.id) if user else False
         if not user or (user.id != owner_id and not is_admin):
-            conn.close(); await query.answer("Non hai i permessi per chiudere questo turno.", show_alert=True); return
+            conn.close()
+            await query.answer("Non hai i permessi per chiudere questo turno.", show_alert=True)
+            return
 
         if status == "closed":
-            conn.close(); await query.edit_message_text("ℹ️ Turno già segnato come risolto."); return
+            conn.close()
+            await query.edit_message_text("ℹ️ Turno già segnato come risolto.")
+            return
 
-        try: await ctx.bot.delete_message(chat_id=src_chat_id, message_id=src_msg_id)
-        except Exception: pass
+        try:
+            await ctx.bot.delete_message(chat_id=src_chat_id, message_id=src_msg_id)
+        except Exception:
+            pass
 
         cur.execute("DELETE FROM shifts WHERE id=?", (shift_id,))
-        conn.commit(); conn.close()
+        conn.commit()
+        conn.close()
 
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         await query.edit_message_text(f"✅ Turno segnato come *Risolto* e rimosso ({human}).", parse_mode="Markdown")
+        return
 
+    # ----- CONTACT -----
     elif parts[0] == "CONTACT":
         try:
             shift_id = int(parts[1])
         except Exception:
-            await query.answer("ID turno non valido.", show_alert=True); return
+            await query.answer("ID turno non valido.", show_alert=True)
+            return
 
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
@@ -925,12 +972,15 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         row = cur.fetchone()
         conn.close()
         if not row:
-            await query.answer("Turno non trovato.", show_alert=True); return
+            await query.answer("Turno non trovato.", show_alert=True)
+            return
 
         src_chat_id, src_msg_id, owner_id, owner_username, date_iso = row
         requester = update.effective_user
-        requester_name = mention_html(requester.id if requester else None,
-                                      f"@{requester.username}" if requester and requester.username else None)
+        requester_name = mention_html(
+            requester.id if requester else None,
+            f"@{requester.username}" if requester and requester.username else None
+        )
 
         try:
             await ctx.bot.copy_message(chat_id=owner_id, from_chat_id=src_chat_id, message_id=src_msg_id)
@@ -945,7 +995,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             btns = None
             if owner_username and isinstance(owner_username, str) and owner_username.startswith("@"):
                 handle = owner_username[1:]
-                btns = InlineKeyboardMarkup([[InlineKeyboardButton("👤 Apri profilo autore", url=f"https://t.me/{handle}")]])
+                btns = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("👤 Apri profilo autore", url=f"https://t.me/{handle}")]]
+                )
             await query.message.reply_text(
                 "⚠️ Non posso scrivere all’autore in privato perché non ha avviato il bot.\n"
                 "Contattalo direttamente dal profilo:",
@@ -953,6 +1005,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             await query.answer("Impossibile inviare il messaggio all’autore.", show_alert=True)
+        return
 
 # -------------------- DM text router / block --------------------
 async def private_text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
