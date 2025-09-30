@@ -573,12 +573,15 @@ def build_calendar(base_date: datetime, mode="SETDATE", extra="") -> InlineKeybo
     keyboard.append([InlineKeyboardButton(f"{month:02d}/{year}", callback_data="IGNORE")])
     keyboard.append([InlineKeyboardButton(d, callback_data="IGNORE") for d in ["L","M","M","G","V","S","D"]])
 
+    # riempi spazi
     week = []
     for _ in range(first_day.weekday()):
         week.append(InlineKeyboardButton(" ", callback_data="IGNORE"))
 
     day = first_day
     while day.month == month:
+        # NB: se mode contiene pipe (es. IMPORTSET) va benissimo:
+        #   callback = "IMPORTSET|YYYY-MM-DD"
         cb = f"{mode}|{day.strftime('%Y-%m-%d')}"
         week.append(InlineKeyboardButton(str(day.day), callback_data=cb))
         if len(week) == 7:
@@ -590,9 +593,10 @@ def build_calendar(base_date: datetime, mode="SETDATE", extra="") -> InlineKeybo
             week.append(InlineKeyboardButton(" ", callback_data="IGNORE"))
         keyboard.append(week)
 
+    # frecce senza pipe finale
     keyboard.append([
         InlineKeyboardButton("<", callback_data=f"NAV|{mode}|{prev_month.strftime('%Y-%m-%d')}"),
-        InlineKeyboardButton(">", callback_data=f"NAV|{mode}|{next_month.strftime('%Y-%m-%d')}")
+        InlineKeyboardButton(">", callback_data=f"NAV|{mode}|{next_month.strftime('%Y-%m-%d')}"),
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -603,8 +607,12 @@ async def import_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
 
     def _has_image(m: Message) -> bool:
-        return bool(getattr(m, "photo", None) or (getattr(m, "document", None) and getattr(m.document, "mime_type", "").startswith("image/")))
+        return bool(
+            getattr(m, "photo", None) or
+            (getattr(m, "document", None) and getattr(m.document, "mime_type", "").startswith("image/"))
+        )
 
+    # /import usato nel GRUPPO, solo in reply a uno screenshot e solo admin
     if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         if not (user and await is_user_admin(update, ctx, user.id)):
             await msg.reply_text("Solo gli admin possono usare /import nel gruppo.")
@@ -612,26 +620,61 @@ async def import_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not msg.reply_to_message:
             await msg.reply_text("Rispondi al messaggio con lo screenshot e invia /import.")
             return
+
         target = msg.reply_to_message
         if not _has_image(target):
             await msg.reply_text("Quel messaggio non contiene un’immagine.")
             return
 
+        # Se la data è già nella caption, importa subito
         date_iso = parse_date(target.caption or "")
         if date_iso:
-            new_id = await _save_import_from_message(ctx, target, date_iso)
-            if new_id == -1:
-                await msg.reply_text("Era già stato importato.")
-            elif new_id:
+            # prepara file_id per eventuale fallback/riuso
+            file_id = None
+            if target.photo:
+                file_id = target.photo[-1].file_id
+            elif getattr(target, "document", None) and getattr(target.document, "mime_type", "").startswith("image/"):
+                file_id = target.document.file_id
+
+            new_id = save_shift_raw(
+                chat_id=target.chat.id,
+                message_id=target.message_id,
+                user_id=(target.from_user.id if target.from_user else None),
+                username=(f"@{target.from_user.username}" if target.from_user and target.from_user.username else (target.from_user.full_name if target.from_user else "")),
+                caption=(target.caption or ""),
+                date_iso=date_iso,
+                file_id=file_id
+            )
+            if new_id:
                 human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
                 await msg.reply_text(f"✅ Importato per il {human}.")
             else:
                 await msg.reply_text("Non sono riuscito a importare.")
             return
 
-        kb = build_calendar(datetime.today(), mode=f"IMPORTSET|{target.chat.id}|{target.message_id}|{user.id}")
-        await msg.reply_text("📅 Seleziona la data per questo turno:", reply_markup=kb)
+        # Altrimenti chiedi UNA data e metti tutto in PENDING
+        kb = build_calendar(datetime.today(), mode="IMPORTSET")
+        cal = await msg.reply_text("📅 Seleziona la data per questo turno:", reply_markup=kb)
+
+        # Prepara dati completi per il callback
+        file_id = None
+        if target.photo:
+            file_id = target.photo[-1].file_id
+        elif getattr(target, "document", None) and getattr(target.document, "mime_type", "").startswith("image/"):
+            file_id = target.document.file_id
+
+        PENDING[cal.message_id] = {
+            "src_chat_id": target.chat.id,
+            "src_msg_id": target.message_id,
+            "owner_id": (target.from_user.id if target.from_user else None),
+            "owner_username": (f"@{target.from_user.username}" if target.from_user and target.from_user.username else (target.from_user.full_name if target.from_user else "")),
+            "caption": (target.caption or ""),
+            "file_id": file_id,
+        }
         return
+
+    # In privato non ha senso: ignoriamo o mostra un help sintetico
+    await msg.reply_text("Usa /import nel gruppo rispondendo allo screenshot da importare (solo admin).")
 
     # PRIVATO
     if chat.type == ChatType.PRIVATE:
@@ -755,21 +798,51 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception: await query.edit_message_reply_markup(reply_markup=None)
         MEDIA_GROUPS.pop(gid, None)
         return
-    elif parts[0] == "IMPORTCAL":
-        date_iso = parts[1]
-    # qui avvii l’import della data scelta
-        await import_for_date(update, ctx, date_iso)  # o la tua funzione equivalente
-        await query.edit_message_text(f"📦 Import in corso per {datetime.strptime(date_iso,'%Y-%m-%d').strftime('%d/%m/%Y')}")
+    
 
     elif parts[0] == "IMPORTSET":
-        if len(parts) < 5:
-            await query.answer(); return
+    # Due formati:
+    # A) IMPORTSET|YYYY-MM-DD                     (gruppo, usa PENDING)
+    # B) IMPORTSET|<src_chat_id>|<src_msg_id>|<requester_id>|YYYY-MM-DD  (DM/inoltro)
+    if len(parts) == 2:
+        # --- Formato A: usa i dati salvati in PENDING con la msg_id del calendario ---
+        date_iso = parts[1]
+        cal_msg_id = query.message.message_id if query.message else None
+        data = PENDING.pop(cal_msg_id, None)
+        if not data:
+            await query.edit_message_text("❌ Non riesco a collegare il calendario al messaggio originale.")
+            return
+
+        save_shift_raw(
+            chat_id=data["src_chat_id"],
+            message_id=data["src_msg_id"],
+            user_id=data.get("owner_id"),
+            username=data.get("owner_username", ""),
+            caption=data.get("caption", ""),
+            date_iso=date_iso,
+            file_id=data.get("file_id"),
+        )
+
+        human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+        try:
+            await query.edit_message_text(f"✅ Importato per il {human}.")
+        except Exception:
+            # in caso di impossibilità a editare, almeno togli la tastiera
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+        return
+
+    elif len(parts) >= 5:
+        # --- Formato B: parametri completi nel callback (DM/inoltro) ---
         try:
             src_chat_id = int(parts[1])
             src_msg_id  = int(parts[2])
             date_iso    = parts[4]
         except Exception:
-            await query.edit_message_text("❌ Parametri non validi."); return
+            await query.edit_message_text("❌ Parametri non validi.")
+            return
 
         class _Fake: pass
         fake = _Fake()
@@ -790,6 +863,11 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Non sono riuscito a importare.")
         return
 
+    else:
+        # Callback malformato
+        await query.answer()
+        return
+
     elif parts[0] == "SEARCH":
         date_iso = parts[1]
         fake_update = Update(update.update_id, message=query.message)
@@ -797,11 +875,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"📅 Risultati mostrati per {datetime.strptime(date_iso, '%Y-%m-%d').strftime('%d/%m/%Y')}")
 
     elif parts[0] == "NAV":
-    # parts = ["NAV", <mode>, <yyyy-mm-01>]  (senza pipe finale)
+    # parts: ["NAV", "<MODE>", "YYYY-MM-DD"]
         mode = parts[1]
-    # prendi SEMPRE l'ultimo pezzo come data, indipendentemente dalla lunghezza
-        new_month_str = parts[-1]
-        new_month = datetime.strptime(new_month_str, "%Y-%m-%d")
+        new_month = datetime.strptime(parts[2], "%Y-%m-%d")
         kb = build_calendar(new_month, mode)
         await query.edit_message_reply_markup(reply_markup=kb)
 
