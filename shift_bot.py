@@ -64,11 +64,13 @@ from telegram import ReplyKeyboardMarkup, KeyboardButton
 
 PRIVATE_KB = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("I miei turni")],            
-        [KeyboardButton("Cerca"), KeyboardButton("Date")]
+        [KeyboardButton("I miei turni")],                      # riga alta, centrale
+        [KeyboardButton("Cerca"), KeyboardButton("Date")],     # riga bassa: sx/dx
     ],
     resize_keyboard=True,
-    one_time_keyboard=False
+    one_time_keyboard=False,
+    is_persistent=True,
+    input_field_placeholder="Usa i pulsanti qui sotto 👇"
 )
 
 # ============== DB ==============
@@ -839,6 +841,11 @@ async def private_text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.effective_message.reply_text("Usa i pulsanti qui sotto 👇", reply_markup=PRIVATE_KB)
 
+async def block_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # In chat privata, blocca qualsiasi testo che non sia uno dei 3 pulsanti
+    if update.effective_chat.type == ChatType.PRIVATE:
+        await update.effective_message.reply_text("Usa i pulsanti 👇", reply_markup=PRIVATE_KB)
+
 # ============== MAIN ==============
 def main():
     if not TOKEN:
@@ -858,7 +865,10 @@ def main():
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
     app.add_handler(CommandHandler("miei", miei_cmd), group=1)
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex("^I miei turni$"), miei_cmd), group=1)
-
+# Alias della tastiera privata (testo → stesse funzioni dei comandi)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^I miei turni$"), miei_cmd), group=1)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Cerca$"), search_cmd), group=1)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Date$"), dates_cmd), group=1)
     # Foto/immagini: screenshot turni (foto + document image)
     img_doc_filter = filters.Document.IMAGE if hasattr(filters.Document, "IMAGE") else filters.Document.MimeType("image/")
     app.add_handler(MessageHandler(filters.PHOTO | img_doc_filter, photo_or_doc_image_handler), group=1)
@@ -869,9 +879,14 @@ def main():
     # Benvenuto nuovi membri
     app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER), group=1)
 
-    # Router testi privati (dopo i command handler)
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), private_text_router), group=2)
-
+# Blocca tutto il resto del testo in DM (mostra solo i pulsanti)
+    app.add_handler(
+    MessageHandler(
+        filters.ChatType.PRIVATE & filters.TEXT & ~filters.Regex("^(I miei turni|Cerca|Date)$"),
+        block_text
+    ),
+    group=3
+)
     print("ShiftBot avviato. Premi Ctrl+C per uscire.")
     app.run_polling()
 
