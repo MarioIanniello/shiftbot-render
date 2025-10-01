@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 ShiftBot – Gestione cambi turni su Telegram
-Versione: 5.6  (album + import + persistence)
+Versione: 5.8  (album + import + persistence + purge)
 """
 
 import os
 import re
 import sqlite3
 import shutil
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 from typing import Optional, Dict, Any
 
 from telegram import (
@@ -42,7 +42,7 @@ def migrate_sqlite_if_needed(persistent_path: str, legacy_path: str = "shiftbot.
             print(f"[ShiftBot] Migrazione DB fallita: {e}")
 
 # -------------------- Config --------------------
-VERSION = "ShiftBot 5.6"
+VERSION = "ShiftBot 5.8"
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
@@ -100,11 +100,15 @@ def ensure_db():
     cur.execute("PRAGMA table_info(shifts);")
     cols = [r[1] for r in cur.fetchall()]
     if "status" not in cols:
-        try: cur.execute("ALTER TABLE shifts ADD COLUMN status TEXT DEFAULT 'open';")
-        except Exception: pass
+        try:
+            cur.execute("ALTER TABLE shifts ADD COLUMN status TEXT DEFAULT 'open';")
+        except Exception:
+            pass
     if "photo_file_id" not in cols:
-        try: cur.execute("ALTER TABLE shifts ADD COLUMN photo_file_id TEXT;")
-        except Exception: pass
+        try:
+            cur.execute("ALTER TABLE shifts ADD COLUMN photo_file_id TEXT;")
+        except Exception:
+            pass
     conn.commit()
     conn.close()
 
@@ -195,6 +199,39 @@ async def ensure_private_menu(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, text
     except Exception:
         pass
 
+# -------------------- Purge: elimina turni scaduti --------------------
+async def purge_expired_shifts(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Cancella i turni con data precedente a oggi.
+    - Prova prima a cancellare i messaggi originali nel gruppo (se esistono/permessi ok).
+    - Poi rimuove i record dal DB.
+    """
+    bot = context.bot
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    # Elenco dei record scaduti per tentare la cancellazione dei messaggi
+    cur.execute("""
+        SELECT id, chat_id, message_id
+        FROM shifts
+        WHERE date(date_iso) < date('now','localtime')
+    """)
+    rows = cur.fetchall()
+
+    for sid, chat_id, message_id in rows:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception:
+            pass  # ok se già cancellato o permessi insufficienti
+
+    # Rimuove definitivamente dal DB
+    cur.execute("DELETE FROM shifts WHERE date(date_iso) < date('now','localtime')")
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+
+    print(f"[ShiftBot] Purge: rimossi {deleted} turni scaduti.")
+
 # -------------------- Import helpers --------------------
 async def _save_import_from_message(ctx: ContextTypes.DEFAULT_TYPE, src_msg: Message, date_iso: Optional[str]) -> Optional[int]:
     """
@@ -256,21 +293,27 @@ async def group_command_guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     cmd = text.split()[0].lower()
     cmd_base = cmd.split("@")[0]
-    admin_allowed = {"/start", "/version", "/import"}
+    admin_allowed = {"/start", "/version", "/import", "/purge"}
 
     if cmd_base in admin_allowed:
         is_admin = await is_user_admin(update, ctx, user.id) if user else False
         if not is_admin:
-            try: await ctx.bot.delete_message(chat.id, msg.message_id)
-            except Exception: pass
-            await dm_or_prompt_private(ctx, user.id, msg,
-                "ℹ️ Nel gruppo solo gli *admin* possono usare /start, /version e /import.\n"
-                "Per le ricerche usa i pulsanti in privato.")
+            try:
+                await ctx.bot.delete_message(chat.id, msg.message_id)
+            except Exception:
+                pass
+            await dm_or_prompt_private(
+                ctx, user.id, msg,
+                "ℹ️ Nel gruppo solo gli *admin* possono usare /start, /version, /import e /purge.\n"
+                "Per le ricerche usa i pulsanti in privato."
+            )
             raise ApplicationHandlerStop()
         return
 
-    try: await ctx.bot.delete_message(chat.id, msg.message_id)
-    except Exception: pass
+    try:
+        await ctx.bot.delete_message(chat.id, msg.message_id)
+    except Exception:
+        pass
     bot_username = ctx.bot.username or "this_bot"
     payload = "search" if cmd.startswith("/cerca") else ("miei" if cmd.startswith("/miei") else "start")
     url = f"https://t.me/{bot_username}?start={payload}"
@@ -285,7 +328,11 @@ async def group_command_guard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
             reply_markup=PRIVATE_KB
         )
-        await ctx.bot.send_message(chat_id=user.id, text="Apri qui la chat privata:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata", url=url)]]))
+        await ctx.bot.send_message(
+            chat_id=user.id,
+            text="Apri qui la chat privata:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata", url=url)]])
+        )
     except Forbidden:
         pass
     raise ApplicationHandlerStop()
@@ -382,14 +429,17 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
             await save_shift(msg, g["date"])
             if not g["notified"]:
                 human = datetime.strptime(g["date"], "%Y-%m-%d").strftime("%d/%m/%Y")
-                try: await ctx.bot.send_message(chat_id=owner_id, text=f"✅ Turno (album) registrato per il {human}", reply_markup=PRIVATE_KB)
-                except Exception: pass
+                try:
+                    await ctx.bot.send_message(chat_id=owner_id, text=f"✅ Turno (album) registrato per il {human}", reply_markup=PRIVATE_KB)
+                except Exception:
+                    pass
                 g["notified"] = True
             return
 
         # Un solo calendario per l'intero album
         if not g["calendar_msg_id"]:
-            kb = build_calendar(datetime.today(), mode=f"SETDATEALBUM|{gid}")
+            # N.B. questa versione usa un mode semplice senza GID nel payload
+            kb = build_calendar(datetime.today(), mode="SETDATEALBUM")
             cal = await msg.reply_text("📅 Seleziona la data per questo turno (album):", reply_markup=kb)
             g["calendar_msg_id"] = cal.message_id
         return
@@ -418,8 +468,10 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
             f"⛔ Hai già un turno *aperto* per il {human}.\n"
             f"Chiudi quello esistente con *Risolto* oppure usa /miei per gestirli."
         )
-        try: await ctx.bot.delete_message(msg.chat.id, msg.message_id)
-        except Exception: pass
+        try:
+            await ctx.bot.delete_message(msg.chat.id, msg.message_id)
+        except Exception:
+            pass
         return
 
     await save_shift(msg, date_iso)
@@ -544,6 +596,10 @@ async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: 
 async def dates_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
+
+    # Purge "just in time" per tenere l'elenco pulito
+    await purge_expired_shifts(ctx)
+
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""SELECT date_iso, COUNT(*) FROM shifts
@@ -580,8 +636,7 @@ def build_calendar(base_date: datetime, mode="SETDATE", extra="") -> InlineKeybo
 
     day = first_day
     while day.month == month:
-        # NB: se mode contiene pipe (es. IMPORTSET) va benissimo:
-        #   callback = "IMPORTSET|YYYY-MM-DD"
+        # callback = "<MODE>|YYYY-MM-DD"
         cb = f"{mode}|{day.strftime('%Y-%m-%d')}"
         week.append(InlineKeyboardButton(str(day.day), callback_data=cb))
         if len(week) == 7:
@@ -593,7 +648,7 @@ def build_calendar(base_date: datetime, mode="SETDATE", extra="") -> InlineKeybo
             week.append(InlineKeyboardButton(" ", callback_data="IGNORE"))
         keyboard.append(week)
 
-    # frecce senza pipe finale
+    # frecce
     keyboard.append([
         InlineKeyboardButton("<", callback_data=f"NAV|{mode}|{prev_month.strftime('%Y-%m-%d')}"),
         InlineKeyboardButton(">", callback_data=f"NAV|{mode}|{next_month.strftime('%Y-%m-%d')}"),
@@ -629,7 +684,6 @@ async def import_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Se la data è già nella caption, importa subito
         date_iso = parse_date(target.caption or "")
         if date_iso:
-            # prepara file_id per eventuale fallback/riuso
             file_id = None
             if target.photo:
                 file_id = target.photo[-1].file_id
@@ -656,7 +710,6 @@ async def import_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         kb = build_calendar(datetime.today(), mode="IMPORTSET")
         cal = await msg.reply_text("📅 Seleziona la data per questo turno:", reply_markup=kb)
 
-        # Prepara dati completi per il callback
         file_id = None
         if target.photo:
             file_id = target.photo[-1].file_id
@@ -700,7 +753,6 @@ async def import_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         kb = build_calendar(datetime.today(), mode=f"IMPORTSET|{src_chat_id}|{src_msg_id}|{user.id}")
         await msg.reply_text("📅 Seleziona la data per questo turno:", reply_markup=kb)
 
-# -------------------- Callback inline --------------------
 # -------------------- Callback inline --------------------
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -790,21 +842,26 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # ----- SETDATEALBUM (album) -----
-    # ----- SETDATEALBUM (album) -----
     elif parts[0] == "SETDATEALBUM":
-        # callback attesa: SETDATEALBUM|<gid>|YYYY-MM-DD
-        if len(parts) < 3:
+        # Questa versione usa PENDING/STATE per l'album; basta solo la data nel payload
+        if len(parts) < 2:
             await query.edit_message_text("❌ Data non valida.")
             return
+        date_iso = parts[1]
 
-        gid = parts[1]
-        date_iso = parts[2]
-
-        g = MEDIA_GROUPS.get(gid)
-        if not g:
+        # trova il gruppo album tramite message_id del calendario
+        cal_msg_id = query.message.message_id if query.message else None
+        gid = None
+        # cerca tra gli album aperti quello che ha calendar_msg_id = cal_msg_id
+        for k, g in list(MEDIA_GROUPS.items()):
+            if g.get("calendar_msg_id") == cal_msg_id:
+                gid = k
+                break
+        if not gid or gid not in MEDIA_GROUPS:
             await query.edit_message_text("❌ Album non trovato.")
             return
 
+        g = MEDIA_GROUPS[gid]
         g["date"] = date_iso
         for p in list(g["photos"]):
             await save_shift(p, date_iso)
@@ -828,10 +885,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ----- IMPORTSET (calendario di /import) -----
     elif parts[0] == "IMPORTSET":
         # Due formati supportati:
-        # A) IMPORTSET|YYYY-MM-DD
-        #    (GRUPPO: usa PENDING agganciato al messaggio del calendario)
-        # B) IMPORTSET|<src_chat_id>|<src_msg_id>|<requester_id>|YYYY-MM-DD
-        #    (DM/inoltro: parametri completi nel callback)
+        # A) IMPORTSET|YYYY-MM-DD        (GRUPPO: usa PENDING agganciato al messaggio del calendario)
+        # B) IMPORTSET|<src_chat_id>|<src_msg_id>|<requester_id>|YYYY-MM-DD   (DM/inoltro)
 
         if len(parts) == 2:
             # --- Formato A: gruppo + PENDING ---
@@ -866,16 +921,18 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # --- Formato B: DM/inoltro ---
             try:
                 src_chat_id = int(parts[1])
-                src_msg_id  = int(parts[2])
-                date_iso    = parts[4]
+                src_msg_id = int(parts[2])
+                date_iso = parts[4]
             except Exception:
                 await query.edit_message_text("❌ Parametri non validi.")
                 return
 
             class _Fake:
                 pass
+
             fake = _Fake()
-            fake.chat = _Fake(); fake.chat.id = src_chat_id
+            fake.chat = _Fake()
+            fake.chat.id = src_chat_id
             fake.message_id = src_msg_id
             fake.caption = ""
             fake.from_user = None
@@ -908,12 +965,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ----- NAV (navigazione mese calendario) -----
     elif parts[0] == "NAV":
-        # callback: NAV|<MODE>|YYYY-MM-DD
-        # Attenzione: <MODE> può contenere pipe (es. SETDATEALBUM|<gid> oppure
-        # IMPORTSET|<src_chat>|<src_msg>|<user>). Quindi:
-        mode = "|".join(parts[1:-1]) if len(parts) > 3 else parts[1]
-        date_token = parts[-1]
-        new_month = datetime.strptime(date_token, "%Y-%m-%d")
+        # parts: ["NAV", "<MODE>", "YYYY-MM-DD"]
+        mode = parts[1]
+        new_month = datetime.strptime(parts[2], "%Y-%m-%d")
         kb = build_calendar(new_month, mode)
         await query.edit_message_reply_markup(reply_markup=kb)
         return
@@ -999,7 +1053,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             btns = None
             if owner_username and isinstance(owner_username, str) and owner_username.startswith("@"):
                 handle = owner_username[1:]
-                btns = InlineKeyboardMarkup([[InlineKeyboardButton("👤 Apri profilo autore", url=f"https://t.me/{handle}")]])
+                btns = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("👤 Apri profilo autore", url=f"https://t.me/{handle}")]]
+                )
             await query.message.reply_text(
                 "⚠️ Non posso scrivere all’autore in privato perché non ha avviato il bot.\n"
                 "Contattalo direttamente dal profilo:",
@@ -1008,6 +1064,19 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await query.answer("Impossibile inviare il messaggio all’autore.", show_alert=True)
         return
+
+# -------------------- /purge (solo admin nel gruppo) --------------------
+async def purge_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if not (user and await is_user_admin(update, ctx, user.id)):
+            await update.effective_message.reply_text("Solo gli admin possono usare /purge qui.")
+            return
+        await purge_expired_shifts(ctx)
+        await update.effective_message.reply_text("🧹 Pulizia completata. I turni scaduti sono stati rimossi.")
+    else:
+        await update.effective_message.reply_text("Usa /purge nel gruppo (solo admin).")
 
 # -------------------- DM text router / block --------------------
 async def private_text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1049,6 +1118,7 @@ def main():
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
     app.add_handler(CommandHandler("miei", miei_cmd), group=1)
     app.add_handler(CommandHandler("import", import_cmd), group=1)
+    app.add_handler(CommandHandler("purge", purge_cmd), group=1)
 
     # Alias tastiera privata
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^I miei turni$"), miei_cmd), group=1)
@@ -1067,6 +1137,11 @@ def main():
 
     # Blocca altro testo in DM
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.Regex("^(I miei turni|Cerca|Date)$"), block_text), group=3)
+
+    # --- Purge automatico ---
+    jq = app.job_queue
+    jq.run_once(purge_expired_shifts, when=30)               # una volta poco dopo l’avvio
+    jq.run_daily(purge_expired_shifts, time=dtime(hour=3))   # tutti i giorni alle 03:00 (ora locale server)
 
     print("ShiftBot avviato. Premi Ctrl+C per uscire.")
     app.run_polling()
