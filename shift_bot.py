@@ -1086,6 +1086,7 @@ async def block_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("Usa i pulsanti 👇", reply_markup=PRIVATE_KB)
 
 # -------------------- MAIN --------------------
+# -------------------- MAIN --------------------
 def main():
     if not TOKEN:
         raise SystemExit("Errore: variabile d'ambiente TELEGRAM_BOT_TOKEN mancante.")
@@ -1095,15 +1096,11 @@ def main():
     print(f"[ShiftBot] DB_PATH = {DB_PATH}")
 
     ensure_db()
+
+    # Crea l'app
     app = ApplicationBuilder().token(TOKEN).build()
-try:
-    jq = app.job_queue
-    if jq is None:
-        raise RuntimeError("JobQueue non disponibile (manca l'extra).")
-    jq.run_once(purge_expired_shifts, when=30)              # una volta dopo l’avvio
-    jq.run_repeating(purge_expired_shifts, interval=3600, first=3600)  # ogni ora
-except Exception as e:
-    print(f"[ShiftBot] JobQueue non disponibile: {e}")
+
+    # === Handlers ===
     # Guardiano nel gruppo
     app.add_handler(MessageHandler(filters.COMMAND, group_command_guard), group=0)
 
@@ -1115,14 +1112,14 @@ except Exception as e:
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
     app.add_handler(CommandHandler("miei", miei_cmd), group=1)
     app.add_handler(CommandHandler("import", import_cmd), group=1)
-    app.add_handler(CommandHandler("menu", menu_cmd), group=1)  # NEW
+    app.add_handler(CommandHandler("menu", menu_cmd), group=1)  # menu nel gruppo
 
-    # Alias tastiera privata (DM)
+# Alias tastiera privata (DM)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^I miei turni$"), miei_cmd), group=1)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Cerca$"), search_cmd), group=1)
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Date$"),  dates_cmd),  group=1)
 
-    # Pulsanti di testo anche nel GRUPPO (NEW)
+    # Pulsanti di testo anche nel GRUPPO
     app.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS & filters.TEXT & filters.Regex("^(I miei turni|Cerca|Date)$"),
@@ -1143,6 +1140,17 @@ except Exception as e:
 
     # Blocca altro testo in DM
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.Regex("^(I miei turni|Cerca|Date)$"), block_text), group=3)
+
+    # === JobQueue (se disponibile) ===
+    jq = getattr(app, "job_queue", None)
+    if jq is not None:
+        try:
+            jq.run_once(purge_expired_shifts, when=30)                    # una volta poco dopo l’avvio
+            jq.run_repeating(purge_expired_shifts, interval=3600, first=3600)  # ogni ora
+        except Exception as e:
+            print(f"[ShiftBot] Errore JobQueue: {e}")
+    else:
+        print("[ShiftBot] JobQueue non disponibile (installa l'extra: python-telegram-bot[job-queue])")
 
     print("ShiftBot avviato. Premi Ctrl+C per uscire.")
     app.run_polling()
