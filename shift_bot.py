@@ -895,10 +895,28 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # ----- NAV (navigazione mese calendario) -----
+     # ----- NAV (navigazione mese calendario) -----
     elif parts[0] == "NAV":
-        # parts: ["NAV", "<MODE>", "YYYY-MM-DD"]
-        mode = parts[1]
-        new_month = datetime.strptime(parts[2], "%Y-%m-%d")
+        # Esempi di callback:
+        #  - NAV|SEARCH|2025-10-01
+        #  - NAV|SETDATE|2025-10-01
+        #  - NAV|SETDATEALBUM|<gid>|2025-10-01
+        #  - NAV|IMPORTSET|<src_chat>|<src_msg>|<user>|2025-10-01
+
+        if len(parts) < 3:
+            await query.answer()
+            return
+
+        # L’ultima parte è sempre la data; tutto ciò che sta in mezzo è il mode (può contenere pipe)
+        date_str = parts[-1]
+        mode = "|".join(parts[1:-1])
+
+        try:
+            new_month = datetime.strptime(date_str, "%Y-%m-%d")
+        except Exception:
+            await query.answer()
+            return
+
         kb = build_calendar(new_month, mode)
         await query.edit_message_reply_markup(reply_markup=kb)
         return
@@ -1078,7 +1096,14 @@ def main():
 
     ensure_db()
     app = ApplicationBuilder().token(TOKEN).build()
-
+try:
+    jq = app.job_queue
+    if jq is None:
+        raise RuntimeError("JobQueue non disponibile (manca l'extra).")
+    jq.run_once(purge_expired_shifts, when=30)              # una volta dopo l’avvio
+    jq.run_repeating(purge_expired_shifts, interval=3600, first=3600)  # ogni ora
+except Exception as e:
+    print(f"[ShiftBot] JobQueue non disponibile: {e}")
     # Guardiano nel gruppo
     app.add_handler(MessageHandler(filters.COMMAND, group_command_guard), group=0)
 
