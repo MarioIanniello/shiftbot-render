@@ -894,7 +894,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ----- NAV (navigazione mese calendario) -----
+    
      # ----- NAV (navigazione mese calendario) -----
     elif parts[0] == "NAV":
         # Esempi di callback:
@@ -1085,7 +1085,40 @@ async def block_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == ChatType.PRIVATE:
         await update.effective_message.reply_text("Usa i pulsanti 👇", reply_markup=PRIVATE_KB)
 
-# -------------------- MAIN --------------------
+# -------------------- LOOP Cancel Turn --------------------
+async def purge_expired_shifts(ctx: ContextTypes.DEFAULT_TYPE):
+    """Cancella i turni con date passate (date_iso < oggi) dal DB e prova a rimuovere il messaggio nel gruppo."""
+    try:
+        # Se vuoi l’ora italiana, scommenta:
+        # import zoneinfo
+        # today = datetime.now(zoneinfo.ZoneInfo("Europe/Rome")).date()
+        today = datetime.today().date()
+
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""SELECT id, chat_id, message_id FROM shifts
+                       WHERE status='open' AND date(date_iso) < date(?)""", (today.isoformat(),))
+        rows = cur.fetchall()
+
+        to_delete_ids = [r[0] for r in rows]
+        for _id, chat_id, msg_id in rows:
+            try:
+                await ctx.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception:
+                pass
+
+        if to_delete_ids:
+            cur.execute(
+                f"DELETE FROM shifts WHERE id IN ({','.join('?'*len(to_delete_ids))})",
+                to_delete_ids
+            )
+            conn.commit()
+
+        conn.close()
+        if to_delete_ids:
+            print(f"[purge] Rimossi {len(to_delete_ids)} turni scaduti (fino a {today.isoformat()}).")
+    except Exception as e:
+        print(f"[purge] Errore durante purge: {e}")
 # -------------------- MAIN --------------------
 def main():
     if not TOKEN:
