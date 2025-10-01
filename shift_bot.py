@@ -790,10 +790,13 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # ----- SETDATEALBUM (album) -----
+    # ----- SETDATEALBUM (album) -----
     elif parts[0] == "SETDATEALBUM":
+        # callback attesa: SETDATEALBUM|<gid>|YYYY-MM-DD
         if len(parts) < 3:
             await query.edit_message_text("❌ Data non valida.")
             return
+
         gid = parts[1]
         date_iso = parts[2]
 
@@ -863,18 +866,16 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # --- Formato B: DM/inoltro ---
             try:
                 src_chat_id = int(parts[1])
-                src_msg_id = int(parts[2])
-                date_iso = parts[4]
+                src_msg_id  = int(parts[2])
+                date_iso    = parts[4]
             except Exception:
                 await query.edit_message_text("❌ Parametri non validi.")
                 return
 
             class _Fake:
                 pass
-
             fake = _Fake()
-            fake.chat = _Fake()
-            fake.chat.id = src_chat_id
+            fake.chat = _Fake(); fake.chat.id = src_chat_id
             fake.message_id = src_msg_id
             fake.caption = ""
             fake.from_user = None
@@ -907,9 +908,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ----- NAV (navigazione mese calendario) -----
     elif parts[0] == "NAV":
-        # parts: ["NAV", "<MODE>", "YYYY-MM-DD"]
-        mode = parts[1]
-        new_month = datetime.strptime(parts[2], "%Y-%m-%d")
+        # callback: NAV|<MODE>|YYYY-MM-DD
+        # Attenzione: <MODE> può contenere pipe (es. SETDATEALBUM|<gid> oppure
+        # IMPORTSET|<src_chat>|<src_msg>|<user>). Quindi:
+        mode = "|".join(parts[1:-1]) if len(parts) > 3 else parts[1]
+        date_token = parts[-1]
+        new_month = datetime.strptime(date_token, "%Y-%m-%d")
         kb = build_calendar(new_month, mode)
         await query.edit_message_reply_markup(reply_markup=kb)
         return
@@ -995,9 +999,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             btns = None
             if owner_username and isinstance(owner_username, str) and owner_username.startswith("@"):
                 handle = owner_username[1:]
-                btns = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("👤 Apri profilo autore", url=f"https://t.me/{handle}")]]
-                )
+                btns = InlineKeyboardMarkup([[InlineKeyboardButton("👤 Apri profilo autore", url=f"https://t.me/{handle}")]])
             await query.message.reply_text(
                 "⚠️ Non posso scrivere all’autore in privato perché non ha avviato il bot.\n"
                 "Contattalo direttamente dal profilo:",
