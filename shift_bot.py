@@ -6,6 +6,7 @@ Versione: 5.7  (album + import + persistence + menu in gruppo)
 """
 
 import os
+import zoneinfo
 import re
 import sqlite3
 import shutil
@@ -963,7 +964,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✅ Turno segnato come *Risolto* e rimosso ({human}).", parse_mode="Markdown")
         return
 
-    # ----- CONTACT -----
+        # ----- CONTACT -----
     elif parts[0] == "CONTACT":
         try:
             shift_id = int(parts[1])
@@ -983,36 +984,75 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         src_chat_id, src_msg_id, owner_id, owner_username, date_iso = row
         requester = update.effective_user
-        requester_name = mention_html(
-            requester.id if requester else None,
-            f"@{requester.username}" if requester and requester.username else None
+
+        # Link “apri chat” per l’autore (verso il richiedente)
+        requester_btn = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(f"💬 Apri chat con {requester.first_name}",
+                                   url=f"tg://user?id={requester.id}")]]
         )
 
+        # Link “apri chat” per il richiedente (verso l’autore)
+        if owner_username and isinstance(owner_username, str) and owner_username.startswith("@"):
+            handle = owner_username[1:]
+            owner_url = f"https://t.me/{handle}"
+        else:
+            owner_url = f"tg://user?id={owner_id}"
+        owner_btn = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("💬 Apri chat con l’autore", url=owner_url)]]
+        )
+
+        # Messaggio all’autore (se ha avviato il bot)
         try:
-            await ctx.bot.copy_message(chat_id=owner_id, from_chat_id=src_chat_id, message_id=src_msg_id)
+            # Copio anche lo screenshot/annuncio così l’autore capisce il contesto
+            try:
+                await ctx.bot.copy_message(chat_id=owner_id, from_chat_id=src_chat_id, message_id=src_msg_id)
+            except Exception:
+                pass
+
             human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y") if date_iso else ""
             text_html = (
-                f'{requester_name} ti ha contattato per il tuo turno del <b>{human}</b>.\n\n'
-                f'<b>Ciao, questo turno è ancora disponibile?</b>'
+                f"{mention_html(requester.id, f'@{requester.username}' if requester and requester.username else None)} "
+                f"vuole contattarti per il tuo turno del <b>{human}</b>.\n\n"
+                f"<b>Tocca il bottone per aprire la chat con lui/lei.</b>"
             )
-            await ctx.bot.send_message(chat_id=owner_id, text=text_html, parse_mode="HTML")
-            await query.message.reply_text("📬 Ho scritto all’autore in privato. Attendi la risposta.")
+            await ctx.bot.send_message(
+                chat_id=owner_id, text=text_html, parse_mode="HTML", reply_markup=requester_btn
+            )
+            owner_notified = True
         except Forbidden:
-            btns = None
-            if owner_username and isinstance(owner_username, str) and owner_username.startswith("@"):
-                handle = owner_username[1:]
-                btns = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("👤 Apri profilo autore", url=f"https://t.me/{handle}")]]
-                )
-            await query.message.reply_text(
-                "⚠️ Non posso scrivere all’autore in privato perché non ha avviato il bot.\n"
-                "Contattalo direttamente dal profilo:",
-                reply_markup=btns
-            )
-        except Exception:
-            await query.answer("Impossibile inviare il messaggio all’autore.", show_alert=True)
-        return
+            owner_notified = False
 
+        # Messaggio al richiedente: bottoncino per aprire la chat con l’autore
+        try:
+            await ctx.bot.send_message(
+                chat_id=requester.id,
+                text="📬 Ho condiviso il tuo contatto con l’autore.\n\n"
+                     "Tocca qui sotto per aprire la sua chat:",
+                reply_markup=owner_btn
+            )
+            requester_notified = True
+        except Forbidden:
+            requester_notified = False
+
+        # Feedback nel contesto dove è stato premuto il bottone
+        if owner_notified and requester_notified:
+            await query.message.reply_text("✅ Ho messo in contatto voi due in privato. Controllate i messaggi.")
+        else:
+            # Costruisco un messaggio di fallback con i link utili
+            fallback_lines = ["ℹ️ Non sono riuscito a scrivere in privato ad almeno uno dei due."]
+            if not owner_notified:
+                fallback_lines.append("• L’autore non ha avviato il bot: prova ad aprire il suo profilo dal bottone qui sotto.")
+                await query.message.reply_text("\n".join(fallback_lines), reply_markup=owner_btn)
+            elif not requester_notified:
+                # In questo raro caso, offro comunque un link per l’autore (verso il richiedente)
+                await query.message.reply_text(
+                    "ℹ️ Non sono riuscito a scriverti in privato. Avvia il bot e riprova.\n"
+                    "Intanto ecco il link per aprire la chat con l’autore:",
+                    reply_markup=owner_btn
+                )
+            else:
+                await query.message.reply_text("ℹ️ Ho inviato i messaggi, ma potrebbe essere necessario avviare il bot in privato.")
+        return
 # -------------------- /menu (anche nel gruppo) --------------------
 async def menu_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Mostra la tastiera ‘I miei turni / Cerca / Date’ anche nel gruppo."""
@@ -1092,8 +1132,7 @@ async def purge_expired_shifts(ctx: ContextTypes.DEFAULT_TYPE):
         # Se vuoi l’ora italiana, scommenta:
         # import zoneinfo
         # today = datetime.now(zoneinfo.ZoneInfo("Europe/Rome")).date()
-        today = datetime.today().date()
-
+        today = datetime.now(zoneinfo.ZoneInfo("Europe/Rome")).date()
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
         cur.execute("""SELECT id, chat_id, message_id FROM shifts
