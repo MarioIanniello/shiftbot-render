@@ -561,7 +561,8 @@ async def dates_list_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int):
     cur = conn.cursor()
     cur.execute("""SELECT date_iso, COUNT(*) FROM shifts
                    WHERE status='open'
-                   GROUP BY date_iso ORDER BY date_iso ASC""")
+                   GROUP BY date_iso
+                   ORDER BY date_iso ASC""")
     rows = cur.fetchall()
     conn.close()
 
@@ -569,11 +570,21 @@ async def dates_list_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int):
         await ctx.bot.send_message(chat_id=user_id, text="Non ci sono turni aperti al momento.", reply_markup=PRIVATE_KB)
         return
 
+    totale = sum(count for _date_iso, count in rows)
+
     lines = ["📆 *Date con turni aperti:*", ""]
     for date_iso, count in rows:
         d = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         lines.append(f"• {d}: {count}")
-    await ctx.bot.send_message(chat_id=user_id, text="\n".join(lines), parse_mode="Markdown", reply_markup=PRIVATE_KB)
+
+    lines += ["", f"*Totale turni aperti:* {totale}"]
+
+    await ctx.bot.send_message(
+        chat_id=user_id,
+        text="\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=PRIVATE_KB
+    )
 
 # ---- helper DM per aprire calendario ricerca ----
 async def send_search_calendar_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int):
