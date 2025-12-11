@@ -353,18 +353,20 @@ async def welcome_new_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # -------------------- Foto/Doc (singolo + album) --------------------
 async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
-    if update.effective_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        return
+    chat = update.effective_chat
+    chat_type = chat.type
 
     caption = (msg.caption or "").strip()
     date_iso = parse_date(caption)
 
-    # --- Album ---
+    # --- Album (funziona ora sia in gruppo che in privato) ---
     if msg.media_group_id:
         gid = msg.media_group_id
         owner_id = msg.from_user.id if msg.from_user else None
-        owner_username = (f"@{msg.from_user.username}" if msg.from_user and msg.from_user.username
-                          else (msg.from_user.full_name if msg.from_user else ""))
+        owner_username = (
+            f"@{msg.from_user.username}" if msg.from_user and msg.from_user.username
+            else (msg.from_user.full_name if msg.from_user else "")
+        )
 
         g = MEDIA_GROUPS.get(gid)
         if not g:
@@ -386,54 +388,98 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
 
         g["photos"].append(msg)
 
-        # Se la data è nota, salva a mano a mano
+        # Se la data è nota, salva man mano
         if g["date"]:
             await save_shift(msg, g["date"])
             if not g["notified"]:
                 human = datetime.strptime(g["date"], "%Y-%m-%d").strftime("%d/%m/%Y")
-                try: await ctx.bot.send_message(chat_id=owner_id, text=f"✅ Turno (album) registrato per il {human}", reply_markup=PRIVATE_KB)
-                except Exception: pass
+                try:
+                    # notifica sempre in privato all'autore
+                    await ctx.bot.send_message(
+                        chat_id=owner_id,
+                        text=f"✅ Turno (album) registrato per il {human}",
+                        reply_markup=PRIVATE_KB
+                    )
+                except Exception:
+                    pass
                 g["notified"] = True
             return
 
-        # Un solo calendario per l'intero album (IMPORTANTE: includi gid nel mode!)
+        # Nessuna data ancora → chiedi UNA data per l’intero album
         if not g["calendar_msg_id"]:
             kb = build_calendar(datetime.today(), mode=f"SETDATEALBUM|{gid}")
-            cal = await msg.reply_text("📅 Seleziona la data per questo turno (album):", reply_markup=kb)
+            cal = await msg.reply_text(
+                "📅 Seleziona la data per questo turno (album):",
+                reply_markup=kb
+            )
             g["calendar_msg_id"] = cal.message_id
         return
 
-    # --- Singolo ---
+    # --- Singolo (gruppo o privato) ---
     if not date_iso:
         kb = build_calendar(datetime.today(), mode="SETDATE")
-        file_id = (msg.photo[-1].file_id if msg.photo else
-                   (msg.document.file_id if getattr(msg, "document", None) and getattr(msg.document, "mime_type", "").startswith("image/") else None))
-        cal = await msg.reply_text("📅 Seleziona la data per questo turno:", reply_markup=kb)
+        file_id = (
+            msg.photo[-1].file_id if msg.photo else
+            (
+                msg.document.file_id
+                if getattr(msg, "document", None)
+                and getattr(msg.document, "mime_type", "").startswith("image/")
+                else None
+            )
+        )
+        cal = await msg.reply_text(
+            "📅 Seleziona la data per questo turno:",
+            reply_markup=kb
+        )
         PENDING[cal.message_id] = {
             "src_chat_id": msg.chat.id,
             "src_msg_id": msg.message_id,
             "owner_id": (msg.from_user.id if msg.from_user else None),
-            "owner_username": (f"@{msg.from_user.username}" if msg.from_user and msg.from_user.username else (msg.from_user.full_name if msg.from_user else "")),
+            "owner_username": (
+                f"@{msg.from_user.username}" if msg.from_user and msg.from_user.username
+                else (msg.from_user.full_name if msg.from_user else "")
+            ),
             "caption": caption,
             "file_id": file_id,
         }
         return
 
+    # Se la data è già presente nella caption
     owner_id = msg.from_user.id if msg.from_user else None
     if owner_id and has_open_on_date(owner_id, date_iso):
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-        await dm_or_prompt_private(
-            ctx, owner_id, msg,
-            f"⛔ Hai già un turno *aperto* per il {human}.\n"
-            f"Chiudi quello esistente con *Risolto* oppure usa /miei per gestirli."
+
+        # Caso GRUPPO: come prima → DM + cancella messaggio nel gruppo
+        if chat_type in (ChatType.GROUP, ChatType.SUPERGROUP):
+            await dm_or_prompt_private(
+                ctx, owner_id, msg,
+                f"⛔ Hai già un turno *aperto* per il {human}.\n"
+                f"Chiudi quello esistente con *Risolto* oppure usa /miei per gestirli."
+            )
+            try:
+                await ctx.bot.delete_message(msg.chat.id, msg.message_id)
+            except Exception:
+                pass
+            return
+
+        # Caso PRIVATO: avvisa direttamente nel DM, nessuna cancellazione necessaria
+        await msg.reply_text(
+            f"⛔ Hai già un turno aperto per il {human}.\n"
+            f"Chiudi quello esistente con *Risolto* oppure usa /miei per gestirli.",
+            reply_markup=PRIVATE_KB
         )
-        try: await ctx.bot.delete_message(msg.chat.id, msg.message_id)
-        except Exception: pass
         return
 
+    # Nessun conflitto → salva
     await save_shift(msg, date_iso)
     human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
-    await dm_or_prompt_private(ctx, owner_id, msg, f"✅ Turno registrato per il {human}")
+
+    # Notifica diversa a seconda del contesto
+    if chat_type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await dm_or_prompt_private(ctx, owner_id, msg, f"✅ Turno registrato per il {human}")
+    else:
+        # PRIVATO: conferma direttamente in chat con il bot
+        await msg.reply_text(f"✅ Turno registrato per il {human}", reply_markup=PRIVATE_KB)
 
 # -------------------- /cerca --------------------
 async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
