@@ -392,6 +392,18 @@ async def pending_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ]])
         await ctx.bot.send_message(chat_id=admin.id, text=f"• {name_line}\nID: {uid}", reply_markup=kb)
 
+
+# -------------------- Help & Version handlers --------------------
+async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    await update.effective_message.reply_text(WELCOME_TEXT, parse_mode="Markdown")
+
+async def version_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    await update.effective_message.reply_text(VERSION)
+
 # -------------------- Search / Dates / My shifts --------------------
 async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: str):
     # Solo utenti approvati (DM)
@@ -913,7 +925,6 @@ def main():
     app.add_handler(CommandHandler("cerca", search_cmd), group=1)
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
     app.add_handler(CommandHandler("miei", miei_cmd), group=1)
-    app.add_handler(CommandHandler("import", import_cmd), group=1)      # se lo tieni anche in DM
 
     # -------------------- Alias tastiera (DM) --------------------
     app.add_handler(
