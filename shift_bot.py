@@ -293,15 +293,28 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             payload = parts[1].strip().upper()
 
     if payload and payload in ORG_LABELS:
-        # set org e pending
-        upsert_user(u.id, username, full_name, org=payload, status="pending")
+        # Se l'utente è nella lista admin del reparto, auto-approva (bootstrap)
+        desired_status = "approved" if is_admin_for_org(u.id, payload) else "pending"
+
+        upsert_user(u.id, username, full_name, org=payload, status=desired_status)
+
+        if desired_status == "approved":
+            await update.effective_message.reply_text(
+                f"✅ Accesso attivo (admin).\nReparto: *{ORG_LABELS[payload]}*\n\n"
+                "Ora puoi usare /pending per approvare gli altri e usare i pulsanti qui sotto 👇",
+                parse_mode="Markdown",
+                reply_markup=PRIVATE_KB
+            )
+            return
+
         await update.effective_message.reply_text(
             f"✅ Richiesta inviata.\nReparto: *{ORG_LABELS[payload]}*\nStato: *pending*\n\n"
             "Un admin del reparto ti approverà.\n"
             "Puoi chiedere all’admin di usare /pending.",
             parse_mode="Markdown"
         )
-        # Notifica agli admin del reparto
+
+        # Notifica agli admin del reparto (se esistono)
         for admin_id in ORG_ADMINS.get(payload, set()):
             try:
                 await ctx.bot.send_message(
