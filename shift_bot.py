@@ -33,8 +33,8 @@ DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 TZ = zoneinfo.ZoneInfo("Europe/Rome")
 
 # Reparti (codici fissi)
-ORG_PDCNAFR = "PDCFR"
-ORG_PDBNAFR = "PDBFR"
+ORG_PDCNAFR = "PDCFRNA"
+ORG_PDBNAFR = "PDBFRNA"
 
 ORG_LABELS = {
     ORG_PDCNAFR: "PDC Napoli Frecciarossa",
@@ -331,16 +331,21 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "📌 Inserisci il codice reparto:\n"
         f"• `{ORG_PDCNAFR}` = {ORG_LABELS[ORG_PDCNAFR]}\n"
         f"• `{ORG_PDBNAFR}` = {ORG_LABELS[ORG_PDBNAFR]}\n\n"
-        "Esempio:\n`/start PDCFR`",
+        "Esempio:\n`/start PDCFRNA`",
         parse_mode="Markdown"
     )
 
 async def myid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != ChatType.PRIVATE:
         return
+
     u = update.effective_user
+    if not u:
+        return
+
+    uname = f"@{u.username}" if u.username else "(senza username)"
     await update.effective_message.reply_text(
-        f"🆔 Il tuo user_id è: `{u.id}`",
+        f"🆔 user_id: `{u.id}`\n👤 username: {uname}",
         parse_mode="Markdown"
     )
 
@@ -832,6 +837,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
 # -------------------- Text router (private) --------------------
+async def block_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Risponde ai testi non riconosciuti in privato, senza interferire con i comandi."""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+    await update.effective_message.reply_text("Usa i pulsanti 👇", reply_markup=PRIVATE_KB)
+
 async def private_text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != ChatType.PRIVATE:
         return
@@ -885,32 +896,70 @@ def main():
 
     ensure_db()
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    # Defaults (timezone Roma utile per jobqueue / date utils)
+    try:
+        from telegram.ext import Defaults
+        defaults = Defaults(tzinfo=zoneinfo.ZoneInfo("Europe/Rome"))
+        app = ApplicationBuilder().token(TOKEN).defaults(defaults).build()
+    except Exception:
+        app = ApplicationBuilder().token(TOKEN).build()
 
-    # Comandi
+    # -------------------- Comandi (DM) --------------------
     app.add_handler(CommandHandler("start", start), group=1)
+    app.add_handler(CommandHandler("help", help_cmd), group=1)          # se ce l'hai
+    app.add_handler(CommandHandler("version", version_cmd), group=1)    # se ce l'hai
     app.add_handler(CommandHandler("myid", myid_cmd), group=1)
-    app.add_handler(CommandHandler("pending", pending_cmd), group=1)
+    app.add_handler(CommandHandler("pending", pending_cmd), group=1)    # se esiste davvero
     app.add_handler(CommandHandler("cerca", search_cmd), group=1)
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
     app.add_handler(CommandHandler("miei", miei_cmd), group=1)
+    app.add_handler(CommandHandler("import", import_cmd), group=1)      # se lo tieni anche in DM
 
-    # Alias tastiera
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^I miei turni$"), miei_cmd), group=1)
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Cerca$"), search_cmd), group=1)
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Date$"),  dates_cmd), group=1)
+    # -------------------- Alias tastiera (DM) --------------------
+    app.add_handler(
+        MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^I miei turni$"), miei_cmd),
+        group=2
+    )
+    app.add_handler(
+        MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Cerca$"), search_cmd),
+        group=2
+    )
+    app.add_handler(
+        MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Date$"), dates_cmd),
+        group=2
+    )
 
-    # Upload immagini in privato
-    img_doc_filter = filters.Document.IMAGE if hasattr(filters.Document, "IMAGE") else filters.Document.MimeType("image/")
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.PHOTO | img_doc_filter), photo_or_doc_image_handler), group=1)
+    # -------------------- Upload immagini in privato --------------------
+    img_doc_filter = (
+        filters.Document.IMAGE
+        if hasattr(filters.Document, "IMAGE")
+        else filters.Document.MimeType("image/")
+    )
+    app.add_handler(
+        MessageHandler(filters.ChatType.PRIVATE & (filters.PHOTO | img_doc_filter), photo_or_doc_image_handler),
+        group=2
+    )
 
-    # Callback inline
-    app.add_handler(CallbackQueryHandler(button_handler), group=1)
+    # -------------------- Callback inline --------------------
+    app.add_handler(CallbackQueryHandler(button_handler), group=2)
 
-    # Router testo generico in privato
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, private_text_router), group=3)
+    # -------------------- Router testo generico in privato --------------------
+    # IMPORTANT: non intercettare i comandi (/myid ecc.)
+    app.add_handler(
+        MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, private_text_router),
+        group=3
+    )
 
-    # JobQueue purge (se disponibile)
+    # Blocca altro testo in DM (escludendo i 3 pulsanti e i comandi)
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.Regex("^(I miei turni|Cerca|Date)$"),
+            block_text
+        ),
+        group=4
+    )
+
+    # -------------------- JobQueue purge (se disponibile) --------------------
     jq = getattr(app, "job_queue", None)
     if jq is not None:
         try:
@@ -922,7 +971,7 @@ def main():
         print("[ShiftBot] JobQueue non disponibile (installa python-telegram-bot[job-queue])")
 
     print("ShiftBot avviato.")
-    app.run_polling()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
