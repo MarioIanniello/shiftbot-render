@@ -835,21 +835,20 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def private_text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != ChatType.PRIVATE:
         return
-    text = (update.effective_message.text or "").strip().lower()
 
-    if text in ("/cerca", "cerca"):
-        await search_cmd(update, ctx); return
-    if text in ("/date", "date"):
-        await dates_cmd(update, ctx); return
-    if text in ("/miei", "miei", "i miei turni"):
-        await miei_cmd(update, ctx); return
+    text = (update.effective_message.text or "").strip()
 
-    # Se l'utente è pending e sta scrivendo il codice reparto
-    if text.upper() in (ORG_PDCNAFR, ORG_PDBNAFR):
-        # simuliamo /start CODICE
-        update.effective_message.text = f"/start {text.upper()}"
-        await start(update, ctx)
+    # ✅ IMPORTANTISSIMO: non intercettare i comandi
+    if text.startswith("/"):
         return
+
+    low = text.lower()
+    if low in ("cerca",):
+        await search_cmd(update, ctx); return
+    if low in ("date",):
+        await dates_cmd(update, ctx); return
+    if low in ("miei", "i miei turni"):
+        await miei_cmd(update, ctx); return
 
     await update.effective_message.reply_text("Usa i pulsanti 👇", reply_markup=PRIVATE_KB)
 
