@@ -43,7 +43,7 @@ ORG_LABELS = {
 
 # Admin per reparto: METTI QUI I NUMERIC USER_ID (non @username)
 ORG_ADMINS = {
-    ORG_PDCNAFR: set(),  # es: {123456789}
+    ORG_PDCNAFR: {455696266},  # es: {123456789}
     ORG_PDBNAFR: set(),  # es: {987654321}
 }
 
