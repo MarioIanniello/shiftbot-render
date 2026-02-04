@@ -709,8 +709,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ---- SEARCH ----
     if parts[0] == "SEARCH":
         date_iso = parts[1]
-        fake_update = Update(update.update_id, message=query.message)
-        await show_shifts(fake_update, ctx, date_iso)
+        # IMPORTANT: non usare fake_update qui. query.message è un messaggio del bot,
+        # quindi fake_update.effective_user diventerebbe il bot e l'auth fallirebbe.
+        await show_shifts(update, ctx, date_iso)
         try:
             await query.edit_message_text(
                 f"📅 Risultati mostrati per {datetime.strptime(date_iso, '%Y-%m-%d').strftime('%d/%m/%Y')}"
@@ -939,19 +940,6 @@ def main():
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
     app.add_handler(CommandHandler("miei", miei_cmd), group=1)
 
-    # -------------------- Alias tastiera (DM) --------------------
-    app.add_handler(
-        MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^I miei turni$"), miei_cmd),
-        group=2
-    )
-    app.add_handler(
-        MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Cerca$"), search_cmd),
-        group=2
-    )
-    app.add_handler(
-        MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & filters.Regex("^Date$"), dates_cmd),
-        group=2
-    )
 
     # -------------------- Upload immagini in privato --------------------
     img_doc_filter = (
