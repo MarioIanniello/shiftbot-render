@@ -116,6 +116,7 @@ def ensure_db():
             date_iso TEXT NOT NULL,
             caption TEXT,
             photo_file_id TEXT,
+            org TEXT,
             status TEXT DEFAULT 'open',
             created_at TEXT DEFAULT (datetime('now'))
         );
@@ -130,6 +131,18 @@ def ensure_db():
     if "photo_file_id" not in cols:
         try: cur.execute("ALTER TABLE shifts ADD COLUMN photo_file_id TEXT;")
         except Exception: pass
+
+    if "org" not in cols:
+        try:
+            cur.execute("ALTER TABLE shifts ADD COLUMN org TEXT;")
+        except Exception:
+            pass
+
+    # Backfill: i turni storici (pre-org) li consideriamo PDC di default
+    try:
+        cur.execute("UPDATE shifts SET org=? WHERE org IS NULL", (ORG_PDCNAFR,))
+    except Exception:
+        pass
 
     # Nuova tabella utenti (auth per reparto)
     cur.execute("""
@@ -194,6 +207,17 @@ def get_user_row(user_id: int) -> Optional[Tuple[int, Optional[str], str]]:
     conn.close()
     return row  # (user_id, org, status) or None
 
+
+def get_approved_org(user_id: int) -> Optional[str]:
+    """Ritorna l'org se l'utente è approved, altrimenti None."""
+    row = get_user_row(user_id)
+    if not row:
+        return None
+    _, org, status = row
+    if status != "approved":
+        return None
+    return org
+
 def count_total_open_shifts() -> int:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -214,13 +238,13 @@ def has_open_on_date(user_id: int, date_iso: str) -> bool:
 
 def save_shift_raw(chat_id: int, message_id: int, user_id: Optional[int],
                    username: Optional[str], caption: str, date_iso: str,
-                   file_id: Optional[str] = None) -> int:
+                   org: Optional[str], file_id: Optional[str] = None) -> int:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        """INSERT INTO shifts(chat_id, message_id, user_id, username, date_iso, caption, photo_file_id, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'open')""",
-        (chat_id, message_id, user_id, (username or ""), date_iso, caption or "", file_id)
+        """INSERT INTO shifts(chat_id, message_id, user_id, username, date_iso, caption, photo_file_id, org, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open')""",
+        (chat_id, message_id, user_id, (username or ""), date_iso, caption or "", file_id, org)
     )
     conn.commit()
     new_id = cur.lastrowid
@@ -236,6 +260,9 @@ async def save_shift(msg: Message, date_iso: str) -> int:
         file_id = msg.photo[-1].file_id
     elif getattr(msg, "document", None) and getattr(msg.document, "mime_type", "").startswith("image/"):
         file_id = msg.document.file_id
+    org = None
+    if msg.from_user:
+        org = get_approved_org(msg.from_user.id)
     return save_shift_raw(
         chat_id=msg.chat.id,
         message_id=msg.message_id,
@@ -243,6 +270,7 @@ async def save_shift(msg: Message, date_iso: str) -> int:
         username=username,
         caption=(msg.caption or ""),
         date_iso=date_iso,
+        org=org,
         file_id=file_id
     )
 
@@ -424,13 +452,25 @@ async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: 
         ok = await require_approved(update, ctx)
         if not ok:
             return
+        requester = update.effective_user
+        requester_org = get_approved_org(requester.id) if requester else None
+        if not requester_org:
+            return
+    else:
+        requester_org = None
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("""SELECT id, chat_id, message_id, user_id, username, caption, photo_file_id
-                   FROM shifts
-                   WHERE date_iso=? AND status='open'
-                   ORDER BY created_at ASC""", (date_iso,))
+    if requester_org:
+        cur.execute("""SELECT id, chat_id, message_id, user_id, username, caption, photo_file_id
+                       FROM shifts
+                       WHERE date_iso=? AND status='open' AND org=?
+                       ORDER BY created_at ASC""", (date_iso, requester_org))
+    else:
+        cur.execute("""SELECT id, chat_id, message_id, user_id, username, caption, photo_file_id
+                       FROM shifts
+                       WHERE date_iso=? AND status='open'
+                       ORDER BY created_at ASC""", (date_iso,))
     rows = cur.fetchall()
     conn.close()
 
@@ -486,11 +526,15 @@ async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("📅 Seleziona la data che vuoi consultare:", reply_markup=kb)
 
 async def dates_list_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int):
+    org = get_approved_org(user_id)
+    if not org:
+        await ctx.bot.send_message(chat_id=user_id, text="⛔ Non sei registrato.")
+        return
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""SELECT date_iso, COUNT(*) FROM shifts
-                   WHERE status='open'
-                   GROUP BY date_iso ORDER BY date_iso ASC""")
+                   WHERE status='open' AND org=?
+                   GROUP BY date_iso ORDER BY date_iso ASC""", (org,))
     rows = cur.fetchall()
     conn.close()
 
@@ -516,13 +560,17 @@ async def dates_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await dates_list_dm(ctx, update.effective_chat.id)
 
 async def miei_list_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int):
+    org = get_approved_org(user_id)
+    if not org:
+        await ctx.bot.send_message(chat_id=user_id, text="⛔ Non sei registrato.")
+        return
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""SELECT id, chat_id, message_id, date_iso, caption, photo_file_id
                    FROM shifts
-                   WHERE user_id=? AND status='open'
+                   WHERE user_id=? AND status='open' AND org=?
                    ORDER BY created_at DESC
-                   LIMIT 50""", (user_id,))
+                   LIMIT 50""", (user_id, org))
     rows = cur.fetchall()
     conn.close()
 
@@ -684,6 +732,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        owner_org = get_approved_org(owner_id) if owner_id else None
         save_shift_raw(
             chat_id=data["src_chat_id"],
             message_id=data["src_msg_id"],
@@ -691,6 +740,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             username=data.get("owner_username", ""),
             caption=data.get("caption", ""),
             date_iso=date_iso,
+            org=owner_org,
             file_id=data.get("file_id"),
         )
 
@@ -762,15 +812,21 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("""SELECT user_id, username, date_iso FROM shifts WHERE id=?""", (shift_id,))
+        cur.execute("""SELECT user_id, username, date_iso, org FROM shifts WHERE id=?""", (shift_id,))
         row = cur.fetchone()
         conn.close()
         if not row:
             await query.answer("Turno non trovato.", show_alert=True)
             return
 
-        owner_id, owner_username, date_iso = row
+        owner_id, owner_username, date_iso, shift_org = row
         requester = update.effective_user
+        # blocca contatto cross-reparto
+        requester_org = get_approved_org(requester.id) if requester else None
+        if requester_org and shift_org and requester_org != shift_org:
+            await query.answer("Turno non visibile per il tuo reparto.", show_alert=True)
+            return
+
         requester_name = mention_html(
             requester.id if requester else None,
             f"@{requester.username}" if requester and requester.username else None
