@@ -239,6 +239,15 @@ def has_open_on_date(user_id: int, date_iso: str) -> bool:
 def save_shift_raw(chat_id: int, message_id: int, user_id: Optional[int],
                    username: Optional[str], caption: str, date_iso: str,
                    org: Optional[str], file_id: Optional[str] = None) -> int:
+    # Enforce org isolation: never save a shift without a valid org.
+    if not org:
+        # Try to infer from user_id (safety net)
+        if user_id:
+            org = get_approved_org(user_id)
+        if not org:
+            print(f"[ShiftBot] Refusing to save shift: missing org (chat_id={chat_id}, message_id={message_id}, user_id={user_id})")
+            return -1
+
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
@@ -863,7 +872,15 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
         )
         return
 
-    await save_shift(msg, date_iso)
+    saved_id = await save_shift(msg, date_iso)
+    if saved_id == -1:
+        await msg.reply_text(
+            "⛔ Non posso salvare il turno: non risulti *approvato* in un reparto.\n"
+            "Invia di nuovo: `/start PDCFRNA` oppure `/start PDBFRNA` e attendi approvazione.",
+            parse_mode="Markdown"
+        )
+        return
+
     human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
     await msg.reply_text(f"✅ Turno registrato per il {human}", reply_markup=PRIVATE_KB)
 
@@ -913,7 +930,15 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         owner_org = get_approved_org(owner_id) if owner_id else None
-        save_shift_raw(
+        if not owner_org:
+            await query.edit_message_text(
+                "⛔ Non posso registrare il turno perché non risulti più *approvato* in un reparto.\n"
+                "Rifai /start con il tuo codice reparto e riprova.",
+                parse_mode="Markdown"
+            )
+            return
+
+        new_id = save_shift_raw(
             chat_id=data["src_chat_id"],
             message_id=data["src_msg_id"],
             user_id=owner_id,
@@ -923,6 +948,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             org=owner_org,
             file_id=data.get("file_id"),
         )
+        if new_id == -1:
+            await query.edit_message_text(
+                "⛔ Non posso registrare il turno: reparto non valido.\nRifai /start e riprova.",
+                parse_mode="Markdown"
+            )
+            return
 
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         try:
