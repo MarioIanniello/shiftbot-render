@@ -434,6 +434,7 @@ async def pending_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat_id=admin.id, text=f"• {name_line}\nID: {uid}", reply_markup=kb)
 
 
+
 # -------------------- Approved users command --------------------
 async def approved_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Lista gli utenti già approvati del *tuo* reparto (solo admin reparto)."""
@@ -505,6 +506,112 @@ async def approved_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             size += len(line) + 1
     if chunk:
         await update.effective_message.reply_text("\n".join(chunk), parse_mode="Markdown")
+
+
+# -------------------- Revoke users command --------------------
+async def revoke_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Revoca l'autorizzazione (approved -> pending) a un utente del *tuo* reparto (solo admin reparto).
+
+    Uso:
+      • /revoke            -> lista approvati con pulsanti Revoca
+      • /revoke <user_id>  -> revoca diretta
+    """
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    admin = update.effective_user
+    if not admin:
+        return
+
+    row = get_user_row(admin.id)
+    if not row:
+        await update.effective_message.reply_text("Non sei registrato. Usa /start.")
+        return
+
+    _, admin_org, status = row
+    if status != "approved" or not admin_org or not is_admin_for_org(admin.id, admin_org):
+        await update.effective_message.reply_text("⛔ Solo gli admin del reparto possono usare /revoke.")
+        return
+
+    # Revoca diretta: /revoke 123
+    target_uid: Optional[int] = None
+    if ctx.args:
+        try:
+            target_uid = int(ctx.args[0])
+        except Exception:
+            target_uid = None
+
+    if target_uid is not None:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, full_name, username, org, status FROM users WHERE user_id=?", (target_uid,))
+        r = cur.fetchone()
+        if not r:
+            conn.close()
+            await update.effective_message.reply_text("❌ Utente non trovato.")
+            return
+
+        uid, full_name, username, org, ustatus = r
+        if org != admin_org:
+            conn.close()
+            await update.effective_message.reply_text("⛔ Puoi revocare solo utenti del tuo reparto.")
+            return
+        if ustatus != "approved":
+            conn.close()
+            await update.effective_message.reply_text("ℹ️ Questo utente non è in stato approved.")
+            return
+
+        cur.execute("UPDATE users SET status='pending' WHERE user_id=? AND org=?", (uid, admin_org))
+        conn.commit()
+        conn.close()
+
+        name = (full_name or "utente") + (f" ({username})" if username else "")
+        await update.effective_message.reply_text(f"✅ Autorizzazione revocata: {name} — `{uid}`", parse_mode="Markdown")
+
+        # Notifica all'utente revocato
+        try:
+            await ctx.bot.send_message(
+                chat_id=uid,
+                text=("⛔ La tua autorizzazione è stata *revocata* dall'admin del reparto.\n\n"
+                      f"Per riattivarla, invia di nuovo: `/start {admin_org}`"),
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+        return
+
+    # Lista approvati con pulsanti Revoca
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT user_id, full_name, username, created_at
+        FROM users
+        WHERE status='approved' AND org=?
+        ORDER BY created_at ASC
+        LIMIT 200
+        """,
+        (admin_org,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    label = ORG_LABELS.get(admin_org, admin_org)
+
+    if not rows:
+        await update.effective_message.reply_text(f"✅ Nessun utente approvato per {label}.")
+        return
+
+    await update.effective_message.reply_text(f"🧯 Revoca autorizzazioni – *{label}*\nSeleziona un utente:", parse_mode="Markdown")
+
+    for uid, full_name, username, _created_at in rows:
+        name = (full_name or "utente")
+        if username:
+            name += f" ({username})"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🧯 Revoca", callback_data=f"REVOKE|{uid}|{admin_org}")]
+        ])
+        await ctx.bot.send_message(chat_id=admin.id, text=f"• {name}\nID: {uid}", reply_markup=kb)
 
 
 # -------------------- Help & Version handlers --------------------
@@ -939,8 +1046,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.answer("Errore durante il contatto.", show_alert=True)
         return
 
-    # ---- APPROVE / REJECT ----
-    if parts[0] in ("APPROVE", "REJECT"):
+    # ---- APPROVE / REJECT / REVOKE ----
+    if parts[0] in ("APPROVE", "REJECT", "REVOKE"):
         admin = update.effective_user
         if not admin:
             return
@@ -961,7 +1068,13 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⛔ Non hai permessi per approvare/rifiutare questo reparto.")
             return
 
-        new_status = "approved" if parts[0] == "APPROVE" else "rejected"
+        if parts[0] == "APPROVE":
+            new_status = "approved"
+        elif parts[0] == "REJECT":
+            new_status = "rejected"
+        else:
+            # REVOKE: torna a pending
+            new_status = "pending"
 
         # aggiorna user
         conn = sqlite3.connect(DB_PATH)
@@ -980,15 +1093,24 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown",
                     reply_markup=PRIVATE_KB
                 )
-            else:
+            elif new_status == "rejected":
                 await ctx.bot.send_message(
                     chat_id=target_uid,
                     text="⛔ Richiesta rifiutata. Se pensi sia un errore, contatta l’admin."
                 )
+            else:
+                # pending (revoca)
+                await ctx.bot.send_message(
+                    chat_id=target_uid,
+                    text=("⛔ La tua autorizzazione è stata *revocata* dall'admin del reparto.\n\n"
+                          f"Per riattivarla, invia di nuovo: `/start {org}`"),
+                    parse_mode="Markdown"
+                )
         except Exception:
             pass
 
-        await query.edit_message_text(f"✅ Operazione completata: {new_status} (ID {target_uid})")
+        action = parts[0]
+        await query.edit_message_text(f"✅ Operazione completata: {action} → {new_status} (ID {target_uid})")
         return
 
 # -------------------- Text router (private) --------------------
@@ -1066,6 +1188,7 @@ def main():
     app.add_handler(CommandHandler("myid", myid_cmd), group=1)
     app.add_handler(CommandHandler("pending", pending_cmd), group=1)    # se esiste davvero
     app.add_handler(CommandHandler("approved", approved_cmd), group=1)
+    app.add_handler(CommandHandler("revoke", revoke_cmd), group=1)
     app.add_handler(CommandHandler("cerca", search_cmd), group=1)
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
     app.add_handler(CommandHandler("miei", miei_cmd), group=1)
