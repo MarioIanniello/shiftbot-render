@@ -434,6 +434,79 @@ async def pending_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat_id=admin.id, text=f"• {name_line}\nID: {uid}", reply_markup=kb)
 
 
+# -------------------- Approved users command --------------------
+async def approved_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Lista gli utenti già approvati del *tuo* reparto (solo admin reparto)."""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    admin = update.effective_user
+    if not admin:
+        return
+
+    row = get_user_row(admin.id)
+    if not row:
+        await update.effective_message.reply_text("Non sei registrato. Usa /start.")
+        return
+
+    _, admin_org, status = row
+    if status != "approved" or not admin_org or not is_admin_for_org(admin.id, admin_org):
+        await update.effective_message.reply_text("⛔ Solo gli admin del reparto possono usare /approved.")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT user_id, full_name, username, created_at
+        FROM users
+        WHERE status='approved' AND org=?
+        ORDER BY created_at ASC
+        """,
+        (admin_org,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    label = ORG_LABELS.get(admin_org, admin_org)
+
+    if not rows:
+        await update.effective_message.reply_text(f"✅ Nessun utente approvato per {label}.")
+        return
+
+    lines = [f"✅ Utenti approvati – *{label}*", ""]
+    for uid, full_name, username, created_at in rows:
+        name = (full_name or "utente")
+        if username:
+            name += f" ({username})"
+        lines.append(f"• {name} — `{uid}`")
+
+    lines.append("")
+    lines.append(f"📌 Totale approvati: *{len(rows)}*")
+
+    text = "\n".join(lines)
+
+    # Telegram ha limite ~4096 caratteri: splitta se necessario
+    MAX = 3800
+    if len(text) <= MAX:
+        await update.effective_message.reply_text(text, parse_mode="Markdown")
+        return
+
+    # spezza per righe
+    chunk = []
+    size = 0
+    for line in lines:
+        if size + len(line) + 1 > MAX:
+            await update.effective_message.reply_text("\n".join(chunk), parse_mode="Markdown")
+            chunk = [line]
+            size = len(line) + 1
+        else:
+            chunk.append(line)
+            size += len(line) + 1
+    if chunk:
+        await update.effective_message.reply_text("\n".join(chunk), parse_mode="Markdown")
+
+
 # -------------------- Help & Version handlers --------------------
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != ChatType.PRIVATE:
@@ -543,7 +616,7 @@ async def dates_list_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int):
         return
 
     total = sum(int(c) for _, c in rows)
-    lines = ["📆 *Date con turni aperti:*", ""]
+    lines = ["🗓️ *Date con turni aperti:*", ""]
     for date_iso, count in rows:
         d = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         lines.append(f"• {d}: {count}")
@@ -992,6 +1065,7 @@ def main():
     app.add_handler(CommandHandler("version", version_cmd), group=1)    # se ce l'hai
     app.add_handler(CommandHandler("myid", myid_cmd), group=1)
     app.add_handler(CommandHandler("pending", pending_cmd), group=1)    # se esiste davvero
+    app.add_handler(CommandHandler("approved", approved_cmd), group=1)
     app.add_handler(CommandHandler("cerca", search_cmd), group=1)
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
     app.add_handler(CommandHandler("miei", miei_cmd), group=1)
