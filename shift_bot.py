@@ -278,6 +278,28 @@ def ensure_db():
         );
     """)
 
+    # Soft migrations users (tutorial evoluto)
+    cur.execute("PRAGMA table_info(users);")
+    ucols = [r[1] for r in cur.fetchall()]
+
+    if "tutorial_stage" not in ucols:
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN tutorial_stage INTEGER DEFAULT 0;")
+        except Exception:
+            pass
+
+    if "last_tutorial_at" not in ucols:
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN last_tutorial_at TEXT;")
+        except Exception:
+            pass
+
+    if "tutorial_reminder_sent" not in ucols:
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN tutorial_reminder_sent INTEGER DEFAULT 0;")
+        except Exception:
+            pass
+
     conn.commit()
     conn.close()
 
@@ -339,6 +361,100 @@ def get_approved_org(user_id: int) -> Optional[str]:
     if status != "approved":
         return None
     return org
+# -------------------- Tutorial helpers --------------------
+TUTORIAL_DONE_STAGE = 4
+
+def _now_iso() -> str:
+    return datetime.now(TZ).isoformat(timespec="seconds")
+
+def get_tutorial_state(user_id: int) -> Tuple[int, Optional[str], int]:
+    """Ritorna (stage, last_tutorial_at, reminder_sent). Defaults: (0, None, 0)."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COALESCE(tutorial_stage,0), last_tutorial_at, COALESCE(tutorial_reminder_sent,0) FROM users WHERE user_id=?",
+        (user_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return (0, None, 0)
+    stage, last_at, rem = row
+    try:
+        stage = int(stage or 0)
+    except Exception:
+        stage = 0
+    try:
+        rem = int(rem or 0)
+    except Exception:
+        rem = 0
+    return (stage, last_at, rem)
+
+def set_tutorial_stage(user_id: int, stage: int) -> None:
+    """Setta lo stage e aggiorna last_tutorial_at. Reset reminder_sent a 0."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET tutorial_stage=?, last_tutorial_at=?, tutorial_reminder_sent=0 WHERE user_id=?",
+        (int(stage), _now_iso(), user_id),
+    )
+    conn.commit()
+    conn.close()
+
+def _tutorial_text_for_stage(stage: int) -> Optional[str]:
+    """Testo guida per lo stage corrente (ritorna None se finito)."""
+    if stage <= 0:
+        return (
+            "📘 *Tutorial rapido*\n\n"
+            "1️⃣ Invia lo screenshot del turno\n"
+            "2️⃣ Seleziona la data dal calendario\n"
+            "3️⃣ Usa i pulsanti sotto per consultare\n\n"
+            "Inizia inviando una foto del turno 👇"
+        )
+    if stage == 1:
+        return (
+            "✅ *Step 1 completato!*\n\n"
+            "Ora prova a consultare i turni:\n"
+            "• Premi *Cerca* e scegli una data\n"
+            "• Oppure premi *Date* per la lista\n"
+        )
+    if stage == 2:
+        return (
+            "✅ *Ottimo!*\n\n"
+            "Ultimo step: premi *I miei turni* per vedere e chiudere i tuoi turni con *Risolto*."
+        )
+    if stage == 3:
+        return (
+            "🎉 *Tutorial completato!*\n\n"
+            "Ora sai caricare e consultare i turni. Buon utilizzo 💪"
+        )
+    return None
+
+def maybe_send_tutorial_tip(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, new_stage: int) -> None:
+    """Avanza lo stage (solo se aumenta) e invia il messaggio guida relativo."""
+    stage, _last, _rem = get_tutorial_state(user_id)
+    if new_stage <= stage:
+        return
+    set_tutorial_stage(user_id, new_stage)
+    text = _tutorial_text_for_stage(new_stage)
+    if not text:
+        return
+
+    async def _send():
+        try:
+            await ctx.bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=PRIVATE_KB
+            )
+        except Exception:
+            pass
+
+    try:
+        ctx.application.create_task(_send())
+    except Exception:
+        pass
 
 def count_total_open_shifts() -> int:
     conn = sqlite3.connect(DB_PATH)
@@ -1242,8 +1358,22 @@ async def dates_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ok = await require_approved(update, ctx)
     if not ok:
         return
-    log_event("dates", user_id=update.effective_chat.id, org=get_approved_org(update.effective_chat.id))
+
+    u = update.effective_user
+    log_event(
+        "dates",
+        user_id=(u.id if u else None),
+        org=(get_approved_org(u.id) if u else None)
+    )
+
     await dates_list_dm(ctx, update.effective_chat.id)
+
+    # Tutorial evoluto: dopo una consultazione spingi verso "I miei turni"
+    try:
+        if u:
+            maybe_send_tutorial_tip(ctx, u.id, 2)
+    except Exception:
+        pass
 
 async def miei_list_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int):
     org = get_approved_org(user_id)
@@ -1685,14 +1815,22 @@ async def private_text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     low = text.lower()
-    if low in ("cerca",):
-        await search_cmd(update, ctx); return
-    if low in ("date",):
-        await dates_cmd(update, ctx); return
-    if low in ("miei", "i miei turni"):
-        await miei_cmd(update, ctx); return
 
-    await update.effective_message.reply_text("Usa i pulsanti 👇", reply_markup=PRIVATE_KB)
+    # Instrada SOLO i 3 pulsanti (case-insensitive)
+    if low == "cerca":
+        await search_cmd(update, ctx)
+        raise ApplicationHandlerStop
+
+    if low == "date":
+        await dates_cmd(update, ctx)
+        raise ApplicationHandlerStop
+
+    if low in ("miei", "i miei turni"):
+        await miei_cmd(update, ctx)
+        raise ApplicationHandlerStop
+
+    # Per qualsiasi altro testo: non rispondere qui (ci pensa block_text)
+    return
 
 # -------------------- Purge (optional) --------------------
 async def purge_expired_shifts(ctx: ContextTypes.DEFAULT_TYPE):
@@ -1780,7 +1918,7 @@ def main():
     # Blocca altro testo in DM (escludendo i 3 pulsanti e i comandi)
     app.add_handler(
         MessageHandler(
-            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.Regex("^(I miei turni|Cerca|Date)$"),
+            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.Regex("(?i)^(I miei turni|Cerca|Date)$"),
             block_text
         ),
         group=4
