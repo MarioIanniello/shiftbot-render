@@ -401,16 +401,31 @@ def set_tutorial_stage(user_id: int, stage: int) -> None:
     conn.commit()
     conn.close()
 
+# Nuovo helper: aggiorna solo last_tutorial_at (senza cambiare stage)
+def touch_tutorial_at(user_id: int) -> None:
+    """Aggiorna solo last_tutorial_at (senza cambiare stage)."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET last_tutorial_at=? WHERE user_id=?",
+        (_now_iso(), user_id),
+    )
+    conn.commit()
+    conn.close()
+
 def _tutorial_text_for_stage(stage: int) -> Optional[str]:
-    """Testo guida per lo stage corrente (ritorna None se finito)."""
+    # stage 0: appena approvato
     if stage <= 0:
         return (
             "📘 *Tutorial rapido*\n\n"
             "1️⃣ Invia lo screenshot del turno\n"
             "2️⃣ Seleziona la data dal calendario\n"
-            "3️⃣ Usa i pulsanti sotto per consultare\n\n"
+            "3️⃣ Consulta i turni con *Cerca* o *Date*\n"
+            "4️⃣ Gestisci i tuoi turni con *I miei turni* (e chiudi con *Risolto*)\n\n"
             "Inizia inviando una foto del turno 👇"
         )
+
+    # stage 1: primo upload salvato
     if stage == 1:
         return (
             "✅ *Step 1 completato!*\n\n"
@@ -418,23 +433,70 @@ def _tutorial_text_for_stage(stage: int) -> Optional[str]:
             "• Premi *Cerca* e scegli una data\n"
             "• Oppure premi *Date* per la lista\n"
         )
+
+    # stage 2: prima consultazione (cerca/date)
     if stage == 2:
         return (
             "✅ *Ottimo!*\n\n"
             "Ultimo step: premi *I miei turni* per vedere e chiudere i tuoi turni con *Risolto*."
         )
+
+    # stage 3: ha aperto 'I miei turni'
     if stage == 3:
         return (
-            "🎉 *Tutorial completato!*\n\n"
-            "Ora sai caricare e consultare i turni. Buon utilizzo 💪"
+            "🎉 *Quasi fatto!*\n\n"
+            "Quando chiudi un turno con *Risolto*, il tutorial si considera completato ✅"
         )
+
+    # stage 4: completato (non inviamo altro)
     return None
 
 def maybe_send_tutorial_tip(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, new_stage: int) -> None:
-    """Avanza lo stage (solo se aumenta) e invia il messaggio guida relativo."""
-    stage, _last, _rem = get_tutorial_state(user_id)
+    """Avanza lo stage (solo se aumenta) e invia il messaggio guida relativo.
+
+    Nota: lo stage 0 è il messaggio introduttivo. Lo inviamo anche quando lo stage è già 0
+    ma solo la *prima volta* (quando last_tutorial_at è None), così l'utente lo riceve subito dopo l'approvazione.
+    """
+    stage, last_at, _rem = get_tutorial_state(user_id)
+
+    # Non tornare indietro
+    if new_stage < stage:
+        return
+
+    # Caso speciale: stage 0 (intro). Se stage è già 0, invia solo se non è mai stato inviato.
+    if new_stage == 0 and stage == 0:
+        if last_at is not None:
+            return
+        # marca che l'intro è stato inviato (senza cambiare stage)
+        try:
+            touch_tutorial_at(user_id)
+        except Exception:
+            pass
+        text = _tutorial_text_for_stage(0)
+        if not text:
+            return
+
+        async def _send_intro():
+            try:
+                await ctx.bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    parse_mode="Markdown",
+                    reply_markup=PRIVATE_KB
+                )
+            except Exception:
+                pass
+
+        try:
+            ctx.application.create_task(_send_intro())
+        except Exception:
+            pass
+        return
+
+    # Standard: avanza solo se aumenta
     if new_stage <= stage:
         return
+
     set_tutorial_stage(user_id, new_stage)
     text = _tutorial_text_for_stage(new_stage)
     if not text:
@@ -1777,6 +1839,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     ),
                     parse_mode="Markdown"
                 )
+                # Tutorial evoluto: invia l'intro (stage 0) subito dopo approvazione
+                maybe_send_tutorial_tip(ctx, target_uid, 0)
             elif new_status == "rejected":
                 await ctx.bot.send_message(
                     chat_id=target_uid,
