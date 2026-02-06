@@ -66,6 +66,32 @@ if not logger.handlers:
     sh.setLevel(logging.INFO)
     logger.addHandler(sh)
 
+#
+# -------------------- Logging helpers --------------------
+
+def _safe_str(x: Any) -> str:
+    try:
+        return str(x)
+    except Exception:
+        return "?"
+
+def log_event(event: str, **fields):
+    """Log strutturato (key=value) per eventi chiave."""
+    try:
+        parts = [f"event={event}"]
+        for k, v in fields.items():
+            parts.append(f"{k}={_safe_str(v)}")
+        logger.info(" ".join(parts))
+    except Exception:
+        # non rompere il bot per il logging
+        pass
+
+def _all_admin_ids() -> set[int]:
+    try:
+        return set().union(*ORG_ADMINS.values()) if ORG_ADMINS else set()
+    except Exception:
+        return set()
+
 # Reparti (codici fissi)
 ORG_PDCNAFR = "PDCFRNA"
 ORG_PDBNAFR = "PDBFRNA"
@@ -407,6 +433,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     username = f"@{u.username}" if u.username else ""
     full_name = u.full_name or "utente"
+    log_event("start", user_id=u.id, username=username, full_name=full_name, payload=(payload or ""))
     upsert_user(u.id, username, full_name, org=None, status=None)
 
     # Se /start <CODICE>
@@ -421,6 +448,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         desired_status = "approved" if is_admin_for_org(u.id, payload) else "pending"
 
         upsert_user(u.id, username, full_name, org=payload, status=desired_status)
+        log_event("auth_request", user_id=u.id, org=payload, status=desired_status)
 
         if desired_status == "approved":
             await update.effective_message.reply_text(
@@ -457,12 +485,14 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     row = get_user_row(u.id)
     _, org, status = row if row else (u.id, None, "pending")
     if status == "approved":
+        log_event("auth_ok", user_id=u.id, org=org, status=status)
         await update.effective_message.reply_text(
             "✅ Accesso attivo.\nUsa i pulsanti qui sotto 👇",
             reply_markup=PRIVATE_KB
         )
         return
 
+    log_event("auth_needed", user_id=u.id, org=org, status=status)
     await update.effective_message.reply_text(
         WELCOME_TEXT + "\n\n"
         "📌 Inserisci il codice reparto:\n"
@@ -504,6 +534,7 @@ async def pending_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⛔ Solo gli admin del reparto possono usare /pending.")
         return
 
+    log_event("pending_list", admin_id=admin.id, org=admin_org)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
@@ -554,6 +585,7 @@ async def approved_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⛔ Solo gli admin del reparto possono usare /approved.")
         return
 
+    log_event("approved_list", admin_id=admin.id, org=admin_org)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
@@ -624,10 +656,11 @@ async def _approved_list_for_org(update: Update, ctx: ContextTypes.DEFAULT_TYPE,
     _, _admin_org, status = row
 
     # Consenti a qualunque admin (di qualunque reparto)
-    all_admins = set().union(*ORG_ADMINS.values()) if ORG_ADMINS else set()
+    all_admins = _all_admin_ids()
     if status != "approved" or admin.id not in all_admins:
         await update.effective_message.reply_text("⛔ Solo gli admin possono usare questo comando.")
         return
+    log_event("approved_list_org", admin_id=admin.id, org=org_code)
 
     if org_code not in ORG_LABELS:
         await update.effective_message.reply_text("❌ Reparto non valido.")
@@ -714,6 +747,7 @@ async def backupnow_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⛔ Solo gli admin possono eseguire /backupnow.")
         return
 
+    log_event("backup_now", admin_id=u.id, org=org)
     path = make_db_backup(reason=f"manual by {u.id}")
     if not path:
         await update.effective_message.reply_text("❌ Backup fallito. Controlla i log su Render.")
@@ -747,6 +781,7 @@ async def backupsend_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⛔ Solo gli admin possono eseguire /backupsend.")
         return
 
+    log_event("backup_send", admin_id=u.id, org=org)
     path = make_db_backup(reason=f"manual-send by {u.id}")
     if not path or not os.path.exists(path):
         await update.effective_message.reply_text("❌ Backup fallito. Controlla i log su Render.")
@@ -792,6 +827,7 @@ async def revoke_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⛔ Solo gli admin del reparto possono usare /revoke.")
         return
 
+    log_event("revoke_open", admin_id=admin.id, org=admin_org, mode=("direct" if ctx.args else "list"))
     # Revoca diretta: /revoke 123
     target_uid: Optional[int] = None
     if ctx.args:
@@ -823,6 +859,7 @@ async def revoke_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         cur.execute("UPDATE users SET status='pending' WHERE user_id=? AND org=?", (uid, admin_org))
         conn.commit()
         conn.close()
+        log_event("revoke_done", admin_id=admin.id, org=admin_org, target_uid=uid)
 
         name = (full_name or "utente") + (f" ({username})" if username else "")
         await update.effective_message.reply_text(f"✅ Autorizzazione revocata: {name} — `{uid}`", parse_mode="Markdown")
@@ -895,10 +932,11 @@ async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     _, _org, status = row
 
     # Consenti /admin2507 a qualunque admin (di qualunque reparto)
-    all_admins = set().union(*ORG_ADMINS.values()) if ORG_ADMINS else set()
+    all_admins = _all_admin_ids()
     if status != "approved" or u.id not in all_admins:
         await update.effective_message.reply_text("⛔ Solo gli admin possono usare /admin2507.")
         return
+    log_event("admin_dashboard", admin_id=u.id)
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -970,6 +1008,72 @@ async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append(f"💾 Dimensione DB: {db_size/1024/1024:.2f} MB")
 
     await update.effective_message.reply_text("\n".join(lines))
+
+#
+# -------------------- Logs command --------------------
+async def logs_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Mostra le ultime righe del log (solo admin). Uso: /logs [N]"""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    u = update.effective_user
+    if not u:
+        return
+
+    row = get_user_row(u.id)
+    if not row:
+        await update.effective_message.reply_text("Non sei registrato. Usa /start.")
+        return
+
+    _, _org, status = row
+    all_admins = _all_admin_ids()
+    if status != "approved" or u.id not in all_admins:
+        await update.effective_message.reply_text("⛔ Solo gli admin possono usare /logs.")
+        return
+
+    # quante righe?
+    n = 200
+    if ctx.args:
+        try:
+            n = max(20, min(2000, int(ctx.args[0])))
+        except Exception:
+            n = 200
+
+    if not os.path.exists(LOG_PATH):
+        await update.effective_message.reply_text("❌ File di log non trovato.")
+        return
+
+    try:
+        with open(LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        tail = lines[-n:] if len(lines) > n else lines
+        header = [f"🧾 Log (ultime {len(tail)} righe)", ""]
+        text_lines = header + [ln.rstrip("\n") for ln in tail]
+
+        # invio a chunk per limite Telegram
+        MAX = 3800
+        chunk: list[str] = []
+        size = 0
+
+        async def _flush():
+            nonlocal chunk, size
+            if chunk:
+                await update.effective_message.reply_text("\n".join(chunk))
+                chunk = []
+                size = 0
+
+        for line in text_lines:
+            add = len(line) + 1
+            if size + add > MAX:
+                await _flush()
+            chunk.append(line)
+            size += add
+
+        await _flush()
+        log_event("logs_view", admin_id=u.id, lines=len(tail))
+    except Exception as e:
+        logger.error(f"[logs] ERROR: {e}")
+        await update.effective_message.reply_text("❌ Errore durante la lettura del log.")
 
 # -------------------- Help & Version handlers --------------------
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1053,7 +1157,8 @@ async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ok = await require_approved(update, ctx)
     if not ok:
         return
-
+    u = update.effective_user
+    log_event("search", user_id=(u.id if u else None), org=(get_approved_org(u.id) if u else None), args=" ".join(ctx.args) if ctx.args else "")
     args = ctx.args
     date_iso = parse_date(" ".join(args)) if args else None
     if date_iso:
@@ -1094,6 +1199,7 @@ async def dates_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ok = await require_approved(update, ctx)
     if not ok:
         return
+    log_event("dates", user_id=update.effective_chat.id, org=get_approved_org(update.effective_chat.id))
     await dates_list_dm(ctx, update.effective_chat.id)
 
 async def miei_list_dm(ctx: ContextTypes.DEFAULT_TYPE, user_id: int):
@@ -1145,6 +1251,7 @@ async def miei_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok:
         return
     u = update.effective_user
+    log_event("miei", user_id=(u.id if u else None), org=(get_approved_org(u.id) if u else None))
     if u:
         await miei_list_dm(ctx, u.id)
 
@@ -1194,6 +1301,8 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
     msg = update.effective_message
     caption = (msg.caption or "").strip()
     date_iso = parse_date(caption)
+    u = update.effective_user
+    log_event("upload_received", user_id=(u.id if u else None), org=(get_approved_org(u.id) if u else None), has_date=bool(date_iso))
 
     if not date_iso:
         kb = build_calendar(datetime.now(TZ), mode="SETDATE")
@@ -1222,6 +1331,7 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
 
     saved_id = await save_shift(msg, date_iso)
     if saved_id == -1:
+        log_event("upload_denied", user_id=(msg.from_user.id if msg.from_user else None), reason="missing_org")
         await msg.reply_text(
             "⛔ Non posso salvare il turno: non risulti *approvato* in un reparto.\n"
             "Invia di nuovo: `/start PDCFRNA` oppure `/start PDBFRNA` e attendi approvazione.",
@@ -1230,6 +1340,7 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
         return
 
     human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
+    log_event("upload_saved", user_id=owner_id, org=get_approved_org(owner_id) if owner_id else None, date_iso=date_iso, shift_id=saved_id)
     await msg.reply_text(f"✅ Turno registrato per il {human}", reply_markup=PRIVATE_KB)
 
 # -------------------- Callback handler --------------------
@@ -1382,7 +1493,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         requester = update.effective_user
         # blocca contatto cross-reparto
         requester_org = get_approved_org(requester.id) if requester else None
+        log_event("contact_click", requester_id=(requester.id if requester else None), requester_org=(get_approved_org(requester.id) if requester else None), owner_id=owner_id, shift_org=shift_org, shift_id=shift_id)
         if requester_org and shift_org and requester_org != shift_org:
+            log_event("contact_blocked_cross_org", requester_id=requester.id if requester else None, requester_org=requester_org, shift_org=shift_org, shift_id=shift_id)
             await query.answer("Turno non visibile per il tuo reparto.", show_alert=True)
             return
 
@@ -1408,8 +1521,10 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 reply_markup=kb
             )
             await query.message.reply_text("📬 Ho avvisato l’autore in privato.")
+            log_event("contact_dm_sent", requester_id=(requester.id if requester else None), owner_id=owner_id, shift_id=shift_id)
         except Forbidden:
             # se l’autore non ha mai aperto il bot, non possiamo scrivergli
+            log_event("contact_dm_forbidden", requester_id=(requester.id if requester else None), owner_id=owner_id, shift_id=shift_id)
             btns = None
             if owner_username and isinstance(owner_username, str) and owner_username.startswith("@"):
                 handle = owner_username[1:]
@@ -1454,6 +1569,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             # REVOKE: torna a pending
             new_status = "pending"
+
+        log_event("user_status_change", admin_id=admin.id, org=org, target_uid=target_uid, action=parts[0], new_status=new_status)
 
         # aggiorna user
         conn = sqlite3.connect(DB_PATH)
@@ -1571,6 +1688,7 @@ def main():
     app.add_handler(CommandHandler("approvedpdcfrna", approvedpdcfrna_cmd), group=1)
     app.add_handler(CommandHandler("approvedpdbfrna", approvedpdbfrna_cmd), group=1)
     app.add_handler(CommandHandler("admin2507", admin_cmd), group=1)
+    app.add_handler(CommandHandler("logs", logs_cmd), group=1)
     app.add_handler(CommandHandler("revoke", revoke_cmd), group=1)
     app.add_handler(CommandHandler("cerca", search_cmd), group=1)
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
