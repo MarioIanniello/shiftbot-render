@@ -401,6 +401,7 @@ def set_tutorial_stage(user_id: int, stage: int) -> None:
     conn.commit()
     conn.close()
 
+
 # Nuovo helper: aggiorna solo last_tutorial_at (senza cambiare stage)
 def touch_tutorial_at(user_id: int) -> None:
     """Aggiorna solo last_tutorial_at (senza cambiare stage)."""
@@ -412,6 +413,120 @@ def touch_tutorial_at(user_id: int) -> None:
     )
     conn.commit()
     conn.close()
+
+# ----------- NEW: Tutorial reminder helpers -----------
+
+def set_tutorial_reminder_sent(user_id: int, sent: int = 1) -> None:
+    """Imposta tutorial_reminder_sent (0/1) senza cambiare lo stage."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET tutorial_reminder_sent=? WHERE user_id=?",
+        (int(sent), user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _hours_since(iso_ts: Optional[str]) -> Optional[float]:
+    if not iso_ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_ts)
+        # se arriva naive, assumiamo TZ Europe/Rome
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ)
+        delta = datetime.now(TZ) - dt
+        return delta.total_seconds() / 3600.0
+    except Exception:
+        return None
+
+
+async def tutorial_reminder_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Step 4 (tutorial automatico): reminder ai nuovi utenti che non completano i passaggi.
+
+    Regola anti-spam:
+    - Solo utenti approved
+    - Solo se tutorial_stage < 4
+    - Solo se last_tutorial_at è più vecchio di REMINDER_AFTER_H
+    - Solo se tutorial_reminder_sent = 0
+
+    Dopo l'invio, setta tutorial_reminder_sent=1.
+    """
+    REMINDER_AFTER_H = 24  # dopo quante ore mandare il promemoria
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT user_id,
+                   COALESCE(tutorial_stage,0) AS stage,
+                   last_tutorial_at,
+                   COALESCE(tutorial_reminder_sent,0) AS rem,
+                   org
+            FROM users
+            WHERE status='approved'
+              AND COALESCE(tutorial_stage,0) < ?
+            """,
+            (TUTORIAL_DONE_STAGE,),
+        )
+        rows = cur.fetchall()
+        conn.close()
+
+        sent_count = 0
+        for user_id, stage, last_at, rem, org in rows:
+            try:
+                stage = int(stage or 0)
+            except Exception:
+                stage = 0
+            try:
+                rem = int(rem or 0)
+            except Exception:
+                rem = 0
+
+            if rem == 1:
+                continue
+
+            hrs = _hours_since(last_at)
+            # se non abbiamo timestamp, non mandiamo reminder (intro gestito altrove)
+            if hrs is None:
+                continue
+
+            if hrs < REMINDER_AFTER_H:
+                continue
+
+            # testo reminder dipende dallo stage corrente
+            tip = _tutorial_text_for_stage(stage)
+            if not tip:
+                continue
+
+            label = ORG_LABELS.get(org, org or "N/D")
+            msg = (
+                "⏰ *Promemoria rapido*\n\n"
+                f"Reparto: *{label}*\n\n"
+                + tip
+            )
+
+            try:
+                await ctx.bot.send_message(
+                    chat_id=int(user_id),
+                    text=msg,
+                    parse_mode="Markdown",
+                    reply_markup=PRIVATE_KB,
+                )
+                set_tutorial_reminder_sent(int(user_id), 1)
+                sent_count += 1
+                log_event("tutorial_reminder_sent", user_id=user_id, org=org, stage=stage, hours_since_last=f"{hrs:.1f}")
+            except Exception:
+                # se non posso scrivere, non bloccare il job
+                log_event("tutorial_reminder_failed", user_id=user_id, org=org, stage=stage)
+                continue
+
+        if sent_count:
+            logger.info(f"[tutorial] reminders sent: {sent_count}")
+    except Exception as e:
+        logger.error(f"[tutorial] reminder job error: {e}")
 
 def _tutorial_text_for_stage(stage: int) -> Optional[str]:
     # stage 0: appena approvato
@@ -2044,6 +2159,8 @@ def main():
             # Backup DB: una volta dopo l'avvio + ogni giorno alle 03:30 (ora di Roma)
             jq.run_once(backup_job, when=60)
             jq.run_daily(backup_job, time=datetime.strptime("03:30", "%H:%M").time(), days=(0,1,2,3,4,5,6))
+            # Tutorial reminder: controlla ogni 6 ore e invia promemoria dopo 24h di inattività
+            jq.run_repeating(tutorial_reminder_job, interval=6 * 3600, first=6 * 3600)
         except Exception as e:
             print(f"[ShiftBot] Errore JobQueue: {e}")
     else:
