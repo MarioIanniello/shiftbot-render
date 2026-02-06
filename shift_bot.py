@@ -789,7 +789,7 @@ async def revoke_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # -------------------- Admin dashboard command --------------------
 async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Mini dashboard admin: utenti, pending, turni aperti (solo admin reparto)."""
+    """Dashboard admin: mostra stats per *tutti* i reparti (solo admin)."""
     if update.effective_chat.type != ChatType.PRIVATE:
         return
 
@@ -802,39 +802,52 @@ async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("Non sei registrato. Usa /start.")
         return
 
-    _, org, status = row
-    if status != "approved" or not org or not is_admin_for_org(u.id, org):
-        await update.effective_message.reply_text("⛔ Solo gli admin del reparto possono usare /admin.")
+    _, _org, status = row
+
+    # Consenti /admin a qualunque admin (di qualunque reparto)
+    all_admins = set().union(*ORG_ADMINS.values()) if ORG_ADMINS else set()
+    if status != "approved" or u.id not in all_admins:
+        await update.effective_message.reply_text("⛔ Solo gli admin possono usare /admin.")
         return
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    # utenti approvati
-    cur.execute("SELECT COUNT(*) FROM users WHERE status='approved' AND org=?", (org,))
-    approved = cur.fetchone()[0]
+    lines = ["📊 Dashboard Admin (tutti i reparti)", ""]
 
-    # utenti pending
-    cur.execute("SELECT COUNT(*) FROM users WHERE status='pending' AND org=?", (org,))
-    pending = cur.fetchone()[0]
+    total_approved = 0
+    total_pending = 0
+    total_open_shifts = 0
 
-    # turni aperti reparto
-    cur.execute("SELECT COUNT(*) FROM shifts WHERE status='open' AND org=?", (org,))
-    open_shifts = cur.fetchone()[0]
+    # Per ogni reparto noto, mostra conteggi separati
+    for org_code, org_label in ORG_LABELS.items():
+        cur.execute("SELECT COUNT(*) FROM users WHERE status='approved' AND org=?", (org_code,))
+        approved = int(cur.fetchone()[0])
+
+        cur.execute("SELECT COUNT(*) FROM users WHERE status='pending' AND org=?", (org_code,))
+        pending = int(cur.fetchone()[0])
+
+        cur.execute("SELECT COUNT(*) FROM shifts WHERE status='open' AND org=?", (org_code,))
+        open_shifts = int(cur.fetchone()[0])
+
+        total_approved += approved
+        total_pending += pending
+        total_open_shifts += open_shifts
+
+        lines.append(f"🏷️ {org_label} ({org_code})")
+        lines.append(f"👥 Approvati: {approved}")
+        lines.append(f"⏳ In attesa: {pending}")
+        lines.append(f"📅 Turni aperti: {open_shifts}")
+        lines.append("")
 
     conn.close()
 
-    label = ORG_LABELS.get(org, org)
+    lines.append("—")
+    lines.append(f"👥 Totale approvati: {total_approved}")
+    lines.append(f"⏳ Totale pending: {total_pending}")
+    lines.append(f"📅 Totale turni aperti: {total_open_shifts}")
 
-    msg = (
-        f"📊 Dashboard Admin\n"
-        f"Reparto: {label}\n\n"
-        f"👥 Utenti approvati: {approved}\n"
-        f"⏳ In attesa: {pending}\n"
-        f"📅 Turni aperti: {open_shifts}\n"
-    )
-
-    await update.effective_message.reply_text(msg)
+    await update.effective_message.reply_text("\n".join(lines))
 
 # -------------------- Help & Version handlers --------------------
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
