@@ -9,6 +9,9 @@ import os
 import re
 import sqlite3
 import shutil
+import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 import zoneinfo
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple
@@ -29,8 +32,34 @@ from telegram.ext import (
 VERSION = "ShiftBot 6.0"
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
+LOG_PATH = os.environ.get("SHIFTBOT_LOG", "logs/shiftbot.log")
 
 TZ = zoneinfo.ZoneInfo("Europe/Rome")
+
+# -------------------- Logging --------------------
+logger = logging.getLogger("shiftbot")
+logger.setLevel(logging.INFO)
+
+# evita duplicazione handler (reload / restart Render)
+if not logger.handlers:
+    Path(os.path.dirname(LOG_PATH) or ".").mkdir(parents=True, exist_ok=True)
+
+    fmt = logging.Formatter("[%(asctime)s] %(levelname)s %(message)s")
+
+    # file log rotante
+    try:
+        fh = RotatingFileHandler(LOG_PATH, maxBytes=2_000_000, backupCount=5, encoding="utf-8")
+        fh.setFormatter(fmt)
+        fh.setLevel(logging.INFO)
+        logger.addHandler(fh)
+    except Exception:
+        pass
+
+    # console log (Render)
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    sh.setLevel(logging.INFO)
+    logger.addHandler(sh)
 
 # Reparti (codici fissi)
 ORG_PDCNAFR = "PDCFRNA"
