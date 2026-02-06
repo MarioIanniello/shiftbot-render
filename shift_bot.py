@@ -446,7 +446,10 @@ async def pending_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # -------------------- Approved users command --------------------
 async def approved_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Lista gli utenti già approvati del *tuo* reparto (solo admin reparto)."""
+    """Lista gli utenti già approvati del *tuo* reparto (solo admin reparto).
+
+    Nota: usiamo testo semplice (no Markdown) per evitare errori di parsing con nomi/username.
+    """
     if update.effective_chat.type != ChatType.PRIVATE:
         return
 
@@ -484,37 +487,37 @@ async def approved_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(f"✅ Nessun utente approvato per {label}.")
         return
 
-    lines = [f"✅ Utenti approvati – *{label}*", ""]
-    for uid, full_name, username, created_at in rows:
-        name = (full_name or "utente")
+    lines = [f"✅ Utenti approvati – {label}", ""]
+    for uid, full_name, username, _created_at in rows:
+        name = (full_name or "utente").strip()
         if username:
             name += f" ({username})"
-        lines.append(f"• {name} — `{uid}`")
+        lines.append(f"• {name} — {uid}")
 
     lines.append("")
-    lines.append(f"📌 Totale approvati: *{len(rows)}*")
+    lines.append(f"Totale approvati: {len(rows)}")
 
-    text = "\n".join(lines)
-
-    # Telegram ha limite ~4096 caratteri: splitta se necessario
+    # Telegram ha limite ~4096 caratteri: invia a chunk
+    text_lines = lines
     MAX = 3800
-    if len(text) <= MAX:
-        await update.effective_message.reply_text(text, parse_mode="Markdown")
-        return
-
-    # spezza per righe
-    chunk = []
+    chunk: list[str] = []
     size = 0
-    for line in lines:
-        if size + len(line) + 1 > MAX:
-            await update.effective_message.reply_text("\n".join(chunk), parse_mode="Markdown")
-            chunk = [line]
-            size = len(line) + 1
-        else:
-            chunk.append(line)
-            size += len(line) + 1
-    if chunk:
-        await update.effective_message.reply_text("\n".join(chunk), parse_mode="Markdown")
+
+    async def _flush():
+        nonlocal chunk, size
+        if chunk:
+            await update.effective_message.reply_text("\n".join(chunk))
+            chunk = []
+            size = 0
+
+    for line in text_lines:
+        add = len(line) + 1
+        if size + add > MAX:
+            await _flush()
+        chunk.append(line)
+        size += add
+
+    await _flush()
 
 
 # -------------------- Revoke users command --------------------
@@ -1219,6 +1222,7 @@ def main():
     app.add_handler(CommandHandler("myid", myid_cmd), group=1)
     app.add_handler(CommandHandler("pending", pending_cmd), group=1)    # se esiste davvero
     app.add_handler(CommandHandler("approved", approved_cmd), group=1)
+    app.add_handler(CommandHandler("approvati", approved_cmd), group=1)
     app.add_handler(CommandHandler("revoke", revoke_cmd), group=1)
     app.add_handler(CommandHandler("cerca", search_cmd), group=1)
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
