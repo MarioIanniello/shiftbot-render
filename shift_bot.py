@@ -1384,6 +1384,12 @@ async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     date_iso = parse_date(" ".join(args)) if args else None
     if date_iso:
         await show_shifts(update, ctx, date_iso)
+        # Tutorial evoluto: prima consultazione (Cerca)
+        try:
+            if u:
+                maybe_send_tutorial_tip(ctx, u.id, 2)
+        except Exception:
+            pass
     else:
         kb = build_calendar(datetime.now(TZ), mode="SEARCH")
         await update.effective_message.reply_text("📅 Seleziona la data che vuoi consultare:", reply_markup=kb)
@@ -1675,6 +1681,14 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # IMPORTANT: non usare fake_update qui. query.message è un messaggio del bot,
         # quindi fake_update.effective_user diventerebbe il bot e l'auth fallirebbe.
         await show_shifts(update, ctx, date_iso)
+
+        # Tutorial evoluto: prima consultazione (Cerca da calendario)
+        try:
+            if query.from_user:
+                maybe_send_tutorial_tip(ctx, query.from_user.id, 2)
+        except Exception:
+            pass
+
         try:
             await query.edit_message_text(
                 f"📅 Risultati mostrati per {datetime.strptime(date_iso, '%Y-%m-%d').strftime('%d/%m/%Y')}"
