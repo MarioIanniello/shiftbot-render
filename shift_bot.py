@@ -606,6 +606,92 @@ async def approved_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await _flush()
 
+# -------------------- Approved users by org (admin-only) --------------------
+async def _approved_list_for_org(update: Update, ctx: ContextTypes.DEFAULT_TYPE, org_code: str):
+    """Lista utenti approvati per uno specifico reparto (solo admin di qualunque reparto)."""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    admin = update.effective_user
+    if not admin:
+        return
+
+    row = get_user_row(admin.id)
+    if not row:
+        await update.effective_message.reply_text("Non sei registrato. Usa /start.")
+        return
+
+    _, _admin_org, status = row
+
+    # Consenti a qualunque admin (di qualunque reparto)
+    all_admins = set().union(*ORG_ADMINS.values()) if ORG_ADMINS else set()
+    if status != "approved" or admin.id not in all_admins:
+        await update.effective_message.reply_text("⛔ Solo gli admin possono usare questo comando.")
+        return
+
+    if org_code not in ORG_LABELS:
+        await update.effective_message.reply_text("❌ Reparto non valido.")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT user_id, full_name, username, created_at
+        FROM users
+        WHERE status='approved' AND org=?
+        ORDER BY created_at ASC
+        """,
+        (org_code,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    label = ORG_LABELS.get(org_code, org_code)
+
+    if not rows:
+        await update.effective_message.reply_text(f"✅ Nessun utente approvato per {label}.")
+        return
+
+    lines = [f"✅ Utenti approvati – {label}", ""]
+    for uid, full_name, username, _created_at in rows:
+        name = (full_name or "utente").strip()
+        if username:
+            name += f" ({username})"
+        lines.append(f"• {name} — {uid}")
+
+    lines.append("")
+    lines.append(f"Totale approvati: {len(rows)}")
+
+    # Chunk per limite Telegram
+    MAX = 3800
+    chunk: list[str] = []
+    size = 0
+
+    async def _flush():
+        nonlocal chunk, size
+        if chunk:
+            await update.effective_message.reply_text("\n".join(chunk))
+            chunk = []
+            size = 0
+
+    for line in lines:
+        add = len(line) + 1
+        if size + add > MAX:
+            await _flush()
+        chunk.append(line)
+        size += add
+
+    await _flush()
+
+
+async def approvedpdcfrna_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _approved_list_for_org(update, ctx, ORG_PDCNAFR)
+
+
+async def approvedpdbfrna_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _approved_list_for_org(update, ctx, ORG_PDBNAFR)
+
 
 # -------------------- Backup command --------------------
 
@@ -789,7 +875,7 @@ async def revoke_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # -------------------- Admin dashboard command --------------------
 async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Dashboard admin: mostra stats per *tutti* i reparti (solo admin)."""
+    """Dashboard admin (comando: /admin2507): mostra stats per *tutti* i reparti (solo admin)."""
     if update.effective_chat.type != ChatType.PRIVATE:
         return
 
@@ -1446,7 +1532,9 @@ def main():
     app.add_handler(CommandHandler("pending", pending_cmd), group=1)    # se esiste davvero
     app.add_handler(CommandHandler("approved", approved_cmd), group=1)
     app.add_handler(CommandHandler("approvati", approved_cmd), group=1)
-    app.add_handler(CommandHandler("admin", admin_cmd), group=1)
+    app.add_handler(CommandHandler("approvedpdcfrna", approvedpdcfrna_cmd), group=1)
+    app.add_handler(CommandHandler("approvedpdbfrna", approvedpdbfrna_cmd), group=1)
+    app.add_handler(CommandHandler("admin2507", admin_cmd), group=1)
     app.add_handler(CommandHandler("revoke", revoke_cmd), group=1)
     app.add_handler(CommandHandler("cerca", search_cmd), group=1)
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
