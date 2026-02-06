@@ -1576,6 +1576,14 @@ async def photo_or_doc_image_handler(update: Update, ctx: ContextTypes.DEFAULT_T
 
     human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
     log_event("upload_saved", user_id=owner_id, org=get_approved_org(owner_id) if owner_id else None, date_iso=date_iso, shift_id=saved_id)
+
+    # Tutorial evoluto: Step 1 (primo upload salvato)
+    try:
+        if owner_id:
+            maybe_send_tutorial_tip(ctx, owner_id, 1)
+    except Exception:
+        pass
+
     await msg.reply_text(f"✅ Turno registrato per il {human}", reply_markup=PRIVATE_KB)
 
 # -------------------- Callback handler --------------------
