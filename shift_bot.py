@@ -440,7 +440,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not u:
         return
 
-      username = f"@{u.username}" if u.username else ""
+    username = f"@{u.username}" if u.username else ""
     full_name = u.full_name or "utente"
 
     # Se /start <CODICE>
@@ -1505,7 +1505,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         requester_org = get_approved_org(requester.id) if requester else None
         log_event("contact_click", requester_id=(requester.id if requester else None), requester_org=(get_approved_org(requester.id) if requester else None), owner_id=owner_id, shift_org=shift_org, shift_id=shift_id)
         if requester_org and shift_org and requester_org != shift_org:
-            log_event("contact_blocked_cross_org", requester_id=requester.id if requester else None, requester_org=requester_org, shift_org=shift_org, shift_id=shift_id)
+            log_event("contact_blocked_cross_org", requester_id=(requester.id if requester else None), requester_org=requester_org, shift_org=shift_org, shift_id=shift_id)
             await query.answer("Turno non visibile per il tuo reparto.", show_alert=True)
             return
 
@@ -1522,11 +1522,15 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 kb = InlineKeyboardMarkup(
                     [[InlineKeyboardButton("👤 Apri profilo richiedente", url=f"https://t.me/{requester.username}")]]
                 )
+            text_html = (
+                f"📩 Richiesta cambio per il turno del <b>{human}</b>\n\n"
+                f"Richiedente: {requester_name}\n\n"
+                f"<b>Messaggio suggerito:</b>\n"
+                f"Ciao, questo turno è ancora disponibile?"
+            )
             await ctx.bot.send_message(
                 chat_id=owner_id,
-                text=(f"📩 Richiesta cambio per il turno del *{human}*\n\n"
-                      f"Richiedente: {requester_name}\n\n"
-                      f"*Messaggio suggerito:* \nCiao, questo turno è ancora disponibile?"),
+                text=text_html,
                 parse_mode="HTML",
                 reply_markup=kb
             )
