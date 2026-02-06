@@ -608,6 +608,7 @@ async def approved_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------- Backup command --------------------
+
 async def backupnow_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Esegue un backup immediato del DB (solo admin di qualunque reparto)."""
     if update.effective_chat.type != ChatType.PRIVATE:
@@ -636,6 +637,48 @@ async def backupnow_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"✅ Backup creato.\nFile: {path}\n\nMantengo gli ultimi {BACKUP_KEEP} backup in `{BACKUP_DIR}`.",
         parse_mode="Markdown"
     )
+
+# -------------------- Backup send command --------------------
+async def backupsend_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Crea un backup e lo invia come file su Telegram (solo admin del proprio reparto).
+
+    Nota: Telegram ha limiti di dimensione; per un DB SQLite normale (pochi MB) è ok.
+    """
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    u = update.effective_user
+    if not u:
+        return
+
+    row = get_user_row(u.id)
+    if not row:
+        await update.effective_message.reply_text("Non sei registrato. Usa /start.")
+        return
+
+    _, org, status = row
+    if status != "approved" or not org or not is_admin_for_org(u.id, org):
+        await update.effective_message.reply_text("⛔ Solo gli admin possono eseguire /backupsend.")
+        return
+
+    path = make_db_backup(reason=f"manual-send by {u.id}")
+    if not path or not os.path.exists(path):
+        await update.effective_message.reply_text("❌ Backup fallito. Controlla i log su Render.")
+        return
+
+    try:
+        # Invia il file come documento
+        await ctx.bot.send_document(
+            chat_id=u.id,
+            document=open(path, "rb"),
+            filename=os.path.basename(path),
+            caption=f"✅ Backup DB\n{os.path.basename(path)}"
+        )
+        await update.effective_message.reply_text("📦 Backup inviato in chat (documento).")
+        logger.info(f"[backup] SENT (manual by {u.id}) -> {path}")
+    except Exception as e:
+        logger.error(f"[backup] SEND ERROR (manual by {u.id}) -> {path}: {e}")
+        await update.effective_message.reply_text("❌ Non sono riuscito a inviarti il file (limite dimensione o errore Telegram).")
 
 
 # -------------------- Revoke users command --------------------
@@ -1347,6 +1390,7 @@ def main():
     app.add_handler(CommandHandler("miei", miei_cmd), group=1)
 
     app.add_handler(CommandHandler("backupnow", backupnow_cmd), group=1)
+    app.add_handler(CommandHandler("backupsend", backupsend_cmd), group=1)
 
 
     # -------------------- Upload immagini in privato --------------------
