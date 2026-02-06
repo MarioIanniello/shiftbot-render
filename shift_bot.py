@@ -391,12 +391,12 @@ async def tutorial_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Private: rispondi normalmente
     if update.effective_chat.type == ChatType.PRIVATE:
-        await update.effective_message.reply_text(text, parse_mode="Markdown", reply_markup=PRIVATE_KB)
+        await update.effective_message.reply_text(text, reply_markup=PRIVATE_KB)
         return
 
     # Gruppo: invia in DM all'utente
     try:
-        await ctx.bot.send_message(chat_id=u.id, text=text, parse_mode="Markdown", reply_markup=PRIVATE_KB)
+        await ctx.bot.send_message(chat_id=u.id, text=text, reply_markup=PRIVATE_KB)
         await update.effective_message.reply_text("✉️ Ti ho inviato la guida in privato.")
         return
     except Forbidden:
