@@ -875,7 +875,11 @@ async def revoke_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # -------------------- Admin dashboard command --------------------
 async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Dashboard admin (comando: /admin2507): mostra stats per *tutti* i reparti (solo admin)."""
+    """Dashboard admin (comando: /admin2507): mostra stats per *tutti* i reparti (solo admin).
+
+    Nota: i reparti vengono letti dinamicamente dal DB (users/shifts) così non devi aggiornare il codice
+    ogni volta che aggiungi un nuovo reparto.
+    """
     if update.effective_chat.type != ChatType.PRIVATE:
         return
 
@@ -890,14 +894,27 @@ async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     _, _org, status = row
 
-    # Consenti /admin a qualunque admin (di qualunque reparto)
+    # Consenti /admin2507 a qualunque admin (di qualunque reparto)
     all_admins = set().union(*ORG_ADMINS.values()) if ORG_ADMINS else set()
     if status != "approved" or u.id not in all_admins:
-        await update.effective_message.reply_text("⛔ Solo gli admin possono usare /admin.")
+        await update.effective_message.reply_text("⛔ Solo gli admin possono usare /admin2507.")
         return
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+
+    # Reparti dinamici: union di quelli presenti in users e shifts
+    cur.execute(
+        """
+        SELECT org FROM (
+            SELECT DISTINCT org AS org FROM users  WHERE org IS NOT NULL AND org <> ''
+            UNION
+            SELECT DISTINCT org AS org FROM shifts WHERE org IS NOT NULL AND org <> ''
+        )
+        ORDER BY org ASC
+        """
+    )
+    orgs = [r[0] for r in cur.fetchall()]
 
     lines = ["📊 Dashboard Admin (tutti i reparti)", ""]
 
@@ -905,8 +922,9 @@ async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     total_pending = 0
     total_open_shifts = 0
 
-    # Per ogni reparto noto, mostra conteggi separati
-    for org_code, org_label in ORG_LABELS.items():
+    for org_code in orgs:
+        org_label = ORG_LABELS.get(org_code, org_code)
+
         cur.execute("SELECT COUNT(*) FROM users WHERE status='approved' AND org=?", (org_code,))
         approved = int(cur.fetchone()[0])
 
@@ -926,12 +944,30 @@ async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append(f"📅 Turni aperti: {open_shifts}")
         lines.append("")
 
+    # Info backup (ultimo file) + dimensione DB
+    try:
+        last_bk = sorted(glob(os.path.join(BACKUP_DIR, "shiftbot_*.sqlite3")))[-1]
+    except Exception:
+        last_bk = None
+
+    try:
+        db_size = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
+    except Exception:
+        db_size = 0
+
     conn.close()
 
     lines.append("—")
     lines.append(f"👥 Totale approvati: {total_approved}")
     lines.append(f"⏳ Totale pending: {total_pending}")
     lines.append(f"📅 Totale turni aperti: {total_open_shifts}")
+
+    if last_bk:
+        lines.append("")
+        lines.append(f"🧾 Ultimo backup: {os.path.basename(last_bk)}")
+
+    if db_size:
+        lines.append(f"💾 Dimensione DB: {db_size/1024/1024:.2f} MB")
 
     await update.effective_message.reply_text("\n".join(lines))
 
