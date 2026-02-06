@@ -367,6 +367,9 @@ def get_approved_org(user_id: int) -> Optional[str]:
 async def tutorial_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != ChatType.PRIVATE:
         return
+    u = update.effective_user
+    if u:
+        log_event("tutorial", user_id=u.id, org=(get_approved_org(u.id) or ""))
     await update.effective_message.reply_text(
         "📘 Guida rapida CambiServizi_bot\n\n"
         "1️⃣ Invia screenshot turno📎 → Scrivi cosa vorresti in cambio ⌨️ → scegli la data 🗓️\n\n"
@@ -1768,8 +1771,14 @@ async def private_text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     text = (update.effective_message.text or "").strip()
 
-    # ✅ IMPORTANTISSIMO: non intercettare i comandi
+    # ✅ IMPORTANTISSIMO: non intercettare i comandi.
+    # Fallback: se per qualche motivo /tutorial non viene trattato come comando (client/forward), gestiscilo qui.
     if text.startswith("/"):
+        cmd = text.split()[0].lower()
+        bot_username = (ctx.bot.username or "").lower()
+        if cmd == "/tutorial" or (bot_username and cmd == f"/tutorial@{bot_username}"):
+            await tutorial_cmd(update, ctx)
+            raise ApplicationHandlerStop
         return
 
     low = text.lower()
