@@ -85,7 +85,16 @@ def log_event(event: str, **fields):
     except Exception:
         # non rompere il bot per il logging
         pass
-
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Global error handler: logs unhandled exceptions without crashing the bot."""
+    try:
+        logger.exception("Unhandled exception", exc_info=ctx.error)
+        try:
+            log_event("error", err=_safe_str(ctx.error))
+        except Exception:
+            pass
+    except Exception:
+        pass
 def _all_admin_ids() -> set[int]:
     try:
         return set().union(*ORG_ADMINS.values()) if ORG_ADMINS else set()
@@ -431,18 +440,18 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not u:
         return
 
-   username = f"@{u.username}" if u.username else ""
-full_name = u.full_name or "utente"
+      username = f"@{u.username}" if u.username else ""
+    full_name = u.full_name or "utente"
 
-# Se /start <CODICE>
-payload = None
-if update.message and update.message.text:
-    parts = update.message.text.split(maxsplit=1)
-    if len(parts) > 1:
-        payload = parts[1].strip().upper()
+    # Se /start <CODICE>
+    payload = None
+    if update.message and update.message.text:
+        parts = update.message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            payload = parts[1].strip().upper()
 
-log_event("start", user_id=u.id, username=username, full_name=full_name, payload=(payload or ""))
-upsert_user(u.id, username, full_name, org=None, status=None)
+    log_event("start", user_id=u.id, username=username, full_name=full_name, payload=(payload or ""))
+    upsert_user(u.id, username, full_name, org=None, status=None)
 
     if payload and payload in ORG_LABELS:
         # Se l'utente è nella lista admin del reparto, auto-approva (bootstrap)
@@ -450,11 +459,7 @@ upsert_user(u.id, username, full_name, org=None, status=None)
 
         upsert_user(u.id, username, full_name, org=payload, status=desired_status)
         log_event("auth_request", user_id=u.id, org=payload, status=desired_status)
-async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        logger.exception("Unhandled exception", exc_info=ctx.error)
-    except Exception:
-        pass
+
         if desired_status == "approved":
             await update.effective_message.reply_text(
                 f"✅ Accesso attivo (admin).\nReparto: *{ORG_LABELS[payload]}*\n\n"
@@ -1701,7 +1706,7 @@ def main():
 
     app.add_handler(CommandHandler("backupnow", backupnow_cmd), group=1)
     app.add_handler(CommandHandler("backupsend", backupsend_cmd), group=1)
-
+    app.add_error_handler(on_error)
 
     # -------------------- Upload immagini in privato --------------------
     img_doc_filter = (
