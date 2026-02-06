@@ -583,7 +583,11 @@ async def pending_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # -------------------- Approved users command --------------------
 async def approved_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Lista gli utenti già approvati del *tuo* reparto (solo admin reparto).
+    """Lista gli utenti approvati.
+
+    Comportamento:
+    - /approved                 -> lista approvati del *tuo* reparto (solo admin del reparto)
+    - /approved <ORG_CODE>      -> lista approvati di un reparto specifico (solo admin "global", cioè presente in ORG_ADMINS di qualunque reparto)
 
     Nota: usiamo testo semplice (no Markdown) per evitare errori di parsing con nomi/username.
     """
@@ -600,6 +604,27 @@ async def approved_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     _, admin_org, status = row
+
+    # Caso: /approved <ORG_CODE>
+    if ctx.args:
+        org_code = (ctx.args[0] or "").strip().upper()
+
+        # Consenti a qualunque admin (di qualunque reparto) di vedere liste per org specifico
+        all_admins = _all_admin_ids()
+        if status != "approved" or admin.id not in all_admins:
+            await update.effective_message.reply_text("⛔ Solo gli admin possono usare /approved <REPARTO>.")
+            return
+
+        # Normalizza alias comuni (utente scrive spesso in minuscolo)
+        if org_code in ("PDCFRNA", ORG_PDCNAFR):
+            org_code = ORG_PDCNAFR
+        elif org_code in ("PDBFRNA", ORG_PDBNAFR):
+            org_code = ORG_PDBNAFR
+
+        await _approved_list_for_org(update, ctx, org_code)
+        return
+
+    # Default: lista approvati del *tuo* reparto (solo admin reparto)
     if status != "approved" or not admin_org or not is_admin_for_org(admin.id, admin_org):
         await update.effective_message.reply_text("⛔ Solo gli admin del reparto possono usare /approved.")
         return
@@ -636,7 +661,6 @@ async def approved_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines.append(f"Totale approvati: {len(rows)}")
 
     # Telegram ha limite ~4096 caratteri: invia a chunk
-    text_lines = lines
     MAX = 3800
     chunk: list[str] = []
     size = 0
@@ -648,7 +672,7 @@ async def approved_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             chunk = []
             size = 0
 
-    for line in text_lines:
+    for line in lines:
         add = len(line) + 1
         if size + add > MAX:
             await _flush()
