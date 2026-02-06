@@ -787,6 +787,55 @@ async def revoke_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat_id=admin.id, text=f"• {name}\nID: {uid}", reply_markup=kb)
 
 
+# -------------------- Admin dashboard command --------------------
+async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Mini dashboard admin: utenti, pending, turni aperti (solo admin reparto)."""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    u = update.effective_user
+    if not u:
+        return
+
+    row = get_user_row(u.id)
+    if not row:
+        await update.effective_message.reply_text("Non sei registrato. Usa /start.")
+        return
+
+    _, org, status = row
+    if status != "approved" or not org or not is_admin_for_org(u.id, org):
+        await update.effective_message.reply_text("⛔ Solo gli admin del reparto possono usare /admin.")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    # utenti approvati
+    cur.execute("SELECT COUNT(*) FROM users WHERE status='approved' AND org=?", (org,))
+    approved = cur.fetchone()[0]
+
+    # utenti pending
+    cur.execute("SELECT COUNT(*) FROM users WHERE status='pending' AND org=?", (org,))
+    pending = cur.fetchone()[0]
+
+    # turni aperti reparto
+    cur.execute("SELECT COUNT(*) FROM shifts WHERE status='open' AND org=?", (org,))
+    open_shifts = cur.fetchone()[0]
+
+    conn.close()
+
+    label = ORG_LABELS.get(org, org)
+
+    msg = (
+        f"📊 Dashboard Admin\n"
+        f"Reparto: {label}\n\n"
+        f"👥 Utenti approvati: {approved}\n"
+        f"⏳ In attesa: {pending}\n"
+        f"📅 Turni aperti: {open_shifts}\n"
+    )
+
+    await update.effective_message.reply_text(msg)
+
 # -------------------- Help & Version handlers --------------------
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != ChatType.PRIVATE:
@@ -1384,6 +1433,7 @@ def main():
     app.add_handler(CommandHandler("pending", pending_cmd), group=1)    # se esiste davvero
     app.add_handler(CommandHandler("approved", approved_cmd), group=1)
     app.add_handler(CommandHandler("approvati", approved_cmd), group=1)
+    app.add_handler(CommandHandler("admin", admin_cmd), group=1)
     app.add_handler(CommandHandler("revoke", revoke_cmd), group=1)
     app.add_handler(CommandHandler("cerca", search_cmd), group=1)
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
