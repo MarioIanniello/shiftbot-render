@@ -101,6 +101,21 @@ def _all_admin_ids() -> set[int]:
     except Exception:
         return set()
 
+
+# -------------------- Helper: is_user_admin --------------------
+async def is_user_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    """True se l'utente è admin di qualunque reparto (ed è approved)."""
+    try:
+        row = get_user_row(user_id)
+        if not row:
+            return False
+        _uid, _org, status = row
+        if status != "approved":
+            return False
+        return user_id in _all_admin_ids()
+    except Exception:
+        return False
+
 # Reparti (codici fissi)
 ORG_PDCNAFR = "PDCFRNA"
 ORG_PDBNAFR = "PDBFRNA"
@@ -411,6 +426,37 @@ async def tutorial_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb
         )
         return
+
+
+# -------------------- /commands (solo admin) --------------------
+async def commands_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Elenca i comandi admin disponibili (esclude /admin2507)."""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    u = update.effective_user
+    if not u:
+        return
+
+    if not await is_user_admin(update, ctx, u.id):
+        await update.effective_message.reply_text("⛔ Comando riservato agli admin.")
+        return
+
+    text = (
+        "🛠 Comandi amministratore disponibili:\n\n"
+        "• /pending — richieste in attesa (del tuo reparto)\n"
+        "• /approved — lista approvati (del tuo reparto)\n"
+        "• /approvedpdcfrna — lista approvati PDCFRNA\n"
+        "• /approvedpdbfrna — lista approvati PDBFRNA\n"
+        "• /revoke — revoca autorizzazione (del tuo reparto)\n"
+        "• /backupnow — crea backup su disco\n"
+        "• /backupsend — crea e invia backup in chat\n"
+        "• /logs [N] — ultime righe log (max 2000)\n"
+        "• /commands — questa lista\n\n"
+        "ℹ️ Il comando /admin2507 resta interno."
+    )
+
+    await update.effective_message.reply_text(text)
 
 def count_total_open_shifts() -> int:
     conn = sqlite3.connect(DB_PATH)
@@ -1876,6 +1922,7 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd), group=1)          # se ce l'hai
     app.add_handler(CommandHandler("version", version_cmd), group=1)    # se ce l'hai
     app.add_handler(CommandHandler("tutorial", tutorial_cmd), group=1)
+    app.add_handler(CommandHandler("commands", commands_cmd), group=1)
     # Fallback robusto: intercetta anche /tutorial@BotName come testo (alcuni client/forward)
     app.add_handler(
         MessageHandler(
