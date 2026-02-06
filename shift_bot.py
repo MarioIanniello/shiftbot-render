@@ -1873,6 +1873,14 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd), group=1)          # se ce l'hai
     app.add_handler(CommandHandler("version", version_cmd), group=1)    # se ce l'hai
     app.add_handler(CommandHandler("tutorial", tutorial_cmd), group=1)
+    # Fallback robusto: intercetta anche /tutorial@BotName come testo (alcuni client/forward)
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.Regex(r"^/tutorial(?:@\\w+)?(?:\\s|$)"),
+            tutorial_cmd
+        ),
+        group=1
+    )
     app.add_handler(CommandHandler("myid", myid_cmd), group=1)
     app.add_handler(CommandHandler("pending", pending_cmd), group=1)    # se esiste davvero
     app.add_handler(CommandHandler("approved", approved_cmd), group=1)
