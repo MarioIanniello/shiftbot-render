@@ -12,6 +12,7 @@ import shutil
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from glob import glob
 import zoneinfo
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple
@@ -33,6 +34,9 @@ VERSION = "ShiftBot 6.0"
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 DB_PATH = os.environ.get("SHIFTBOT_DB", "shiftbot.sqlite3")
 LOG_PATH = os.environ.get("SHIFTBOT_LOG", "logs/shiftbot.log")
+
+BACKUP_DIR = os.environ.get("SHIFTBOT_BACKUP_DIR", "backups")
+BACKUP_KEEP = int(os.environ.get("SHIFTBOT_BACKUP_KEEP", "14"))  # numero backup da mantenere
 
 TZ = zoneinfo.ZoneInfo("Europe/Rome")
 
@@ -108,6 +112,53 @@ PRIVATE_KB = ReplyKeyboardMarkup(
 
 # -------------------- Volatile state --------------------
 PENDING: Dict[int, Dict[str, Any]] = {}  # calendario -> dati post/immagine
+
+
+# -------------------- Backup helpers --------------------
+def _safe_mkdir(path: str):
+    try:
+        Path(path).mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+def _rotate_backups(backup_dir: str, keep: int):
+    try:
+        files = sorted(glob(os.path.join(backup_dir, "shiftbot_*.sqlite3")))
+        if keep is None or keep <= 0:
+            return
+        if len(files) <= keep:
+            return
+        to_remove = files[: max(0, len(files) - keep)]
+        for f in to_remove:
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def make_db_backup(reason: str = "scheduled") -> Optional[str]:
+    """Crea un backup copiando il DB in BACKUP_DIR con timestamp. Ritorna il path del backup creato o None."""
+    try:
+        _safe_mkdir(BACKUP_DIR)
+        ts = datetime.now(TZ).strftime("%Y%m%d_%H%M%S")
+        dst = os.path.join(BACKUP_DIR, f"shiftbot_{ts}.sqlite3")
+
+        if not os.path.exists(DB_PATH):
+            logger.warning(f"[backup] DB non trovato, salto backup (DB_PATH={DB_PATH})")
+            return None
+
+        shutil.copy2(DB_PATH, dst)
+        _rotate_backups(BACKUP_DIR, BACKUP_KEEP)
+        logger.info(f"[backup] OK ({reason}) -> {dst}")
+        return dst
+    except Exception as e:
+        logger.error(f"[backup] ERRORE ({reason}): {e}")
+        return None
+
+async def backup_job(ctx: ContextTypes.DEFAULT_TYPE):
+    # job pianificato
+    make_db_backup(reason="job")
 
 
 # -------------------- Helpers: FS / DB --------------------
@@ -547,6 +598,37 @@ async def approved_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         size += add
 
     await _flush()
+
+
+# -------------------- Backup command --------------------
+async def backupnow_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Esegue un backup immediato del DB (solo admin di qualunque reparto)."""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    u = update.effective_user
+    if not u:
+        return
+
+    row = get_user_row(u.id)
+    if not row:
+        await update.effective_message.reply_text("Non sei registrato. Usa /start.")
+        return
+
+    _, org, status = row
+    if status != "approved" or not org or not is_admin_for_org(u.id, org):
+        await update.effective_message.reply_text("⛔ Solo gli admin possono eseguire /backupnow.")
+        return
+
+    path = make_db_backup(reason=f"manual by {u.id}")
+    if not path:
+        await update.effective_message.reply_text("❌ Backup fallito. Controlla i log su Render.")
+        return
+
+    await update.effective_message.reply_text(
+        f"✅ Backup creato.\nFile: {path}\n\nMantengo gli ultimi {BACKUP_KEEP} backup in `{BACKUP_DIR}`.",
+        parse_mode="Markdown"
+    )
 
 
 # -------------------- Revoke users command --------------------
@@ -1257,6 +1339,8 @@ def main():
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
     app.add_handler(CommandHandler("miei", miei_cmd), group=1)
 
+    app.add_handler(CommandHandler("backupnow", backupnow_cmd), group=1)
+
 
     # -------------------- Upload immagini in privato --------------------
     img_doc_filter = (
@@ -1294,6 +1378,9 @@ def main():
         try:
             jq.run_once(purge_expired_shifts, when=30)
             jq.run_repeating(purge_expired_shifts, interval=3600, first=3600)
+            # Backup DB: una volta dopo l'avvio + ogni giorno alle 03:30 (ora di Roma)
+            jq.run_once(backup_job, when=60)
+            jq.run_daily(backup_job, time=datetime.strptime("03:30", "%H:%M").time(), days=(0,1,2,3,4,5,6))
         except Exception as e:
             print(f"[ShiftBot] Errore JobQueue: {e}")
     else:
