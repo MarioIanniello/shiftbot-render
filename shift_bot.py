@@ -467,6 +467,15 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
                 reply_markup=PRIVATE_KB
             )
+            await update.effective_message.reply_text(
+                "📘 *Mini‑tutorial rapido*\n\n"
+                "• Invia una foto del turno → scegli la data\n"
+                "• Usa *Cerca* per vedere turni disponibili\n"
+                "• Usa *Date* per elenco sintetico\n"
+                "• Usa *I miei turni* per gestire i tuoi\n\n"
+                "Se hai dubbi scrivi pure.",
+                parse_mode="Markdown"
+            )
             return
 
         await update.effective_message.reply_text(
@@ -1602,6 +1611,17 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                           "Ora puoi caricare turni (invia immagine) e usare i pulsanti 👇"),
                     parse_mode="Markdown",
                     reply_markup=PRIVATE_KB
+                )
+                await ctx.bot.send_message(
+                    chat_id=target_uid,
+                    text=(
+                        "📘 *Come funziona il bot*\n\n"
+                        "1️⃣ Invia lo screenshot del turno\n"
+                        "2️⃣ Seleziona la data dal calendario\n"
+                        "3️⃣ Consulta i turni con i pulsanti sotto\n\n"
+                        "Buon utilizzo 👍"
+                    ),
+                    parse_mode="Markdown"
                 )
             elif new_status == "rejected":
                 await ctx.bot.send_message(
