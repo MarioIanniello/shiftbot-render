@@ -365,21 +365,49 @@ def get_approved_org(user_id: int) -> Optional[str]:
 
 # ----------- Tutorial quick command -----------
 async def tutorial_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != ChatType.PRIVATE:
-        return
+    """Mostra la guida rapida.
+
+    - In privato: risponde in chat.
+    - In gruppo/supergruppo: prova a inviare in DM all'utente; se non può, mostra un bottone per aprire il bot.
+    """
     u = update.effective_user
-    if u:
-        log_event("tutorial", user_id=u.id, org=(get_approved_org(u.id) or ""))
-    await update.effective_message.reply_text(
+    if not u:
+        return
+
+    text = (
         "📘 Guida rapida CambiServizi_bot\n\n"
         "1️⃣ Invia screenshot turno📎 → Scrivi cosa vorresti in cambio ⌨️ → scegli la data 🗓️\n\n"
         "2️⃣ Premi Cerca per trovare turni in una data specifica\n\n"
         "3️⃣ Premi Date per elenco sintetico\n\n"
         "4️⃣ Premi I miei turni per gestire i tuoi. Clicca su Risolto ✅ se il cambio è stato effettuato.\n\n"
-        "Fine 🙂",
-        parse_mode="Markdown",
-        reply_markup=PRIVATE_KB
+        "Fine 🙂"
     )
+
+    # log
+    try:
+        log_event("tutorial", user_id=u.id, org=(get_approved_org(u.id) or ""), chat_type=update.effective_chat.type)
+    except Exception:
+        pass
+
+    # Private: rispondi normalmente
+    if update.effective_chat.type == ChatType.PRIVATE:
+        await update.effective_message.reply_text(text, parse_mode="Markdown", reply_markup=PRIVATE_KB)
+        return
+
+    # Gruppo: invia in DM all'utente
+    try:
+        await ctx.bot.send_message(chat_id=u.id, text=text, parse_mode="Markdown", reply_markup=PRIVATE_KB)
+        await update.effective_message.reply_text("✉️ Ti ho inviato la guida in privato.")
+        return
+    except Forbidden:
+        bot_username = ctx.bot.username or "this_bot"
+        url = f"https://t.me/{bot_username}?start=start"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Apri chat privata col bot", url=url)]])
+        await update.effective_message.reply_text(
+            "Per leggere la guida devi prima aprire la chat privata con me:",
+            reply_markup=kb
+        )
+        return
 
 def count_total_open_shifts() -> int:
     conn = sqlite3.connect(DB_PATH)
