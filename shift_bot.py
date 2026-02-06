@@ -368,12 +368,12 @@ async def tutorial_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != ChatType.PRIVATE:
         return
     await update.effective_message.reply_text(
-        "📘 *Guida rapida CambiServizi_bot*\n\n"
-        "1️⃣ Invia screenshot turno → scegli la data\n"
-        "2️⃣ Premi *Cerca* per trovare turni\n"
-        "3️⃣ Premi *Date* per elenco sintetico\n"
-        "4️⃣ Premi *I miei turni* per gestire i tuoi\n\n"
-        "Fine 🙂 Nessun tutorial obbligatorio.",
+        "📘 Guida rapida CambiServizi_bot\n\n"
+        "1️⃣ Invia screenshot turno📎 → Scrivi cosa vorresti in cambio ⌨️ → scegli la data 🗓️\n\n"
+        "2️⃣ Premi Cerca per trovare turni in una data specifica\n\n"
+        "3️⃣ Premi Date per elenco sintetico\n\n"
+        "4️⃣ Premi I miei turni per gestire i tuoi. Clicca su Risolto ✅ se il cambio è stato effettuato.\n\n"
+        "Fine 🙂",
         parse_mode="Markdown",
         reply_markup=PRIVATE_KB
     )
