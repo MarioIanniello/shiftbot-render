@@ -448,8 +448,16 @@ def _tutorial_text_for_stage(stage: int) -> Optional[str]:
             "Quando chiudi un turno con *Risolto*, il tutorial si considera completato ✅"
         )
 
-    # stage 4: completato (non inviamo altro)
-    return None
+    # stage 4: completato
+    if stage >= 4:
+        return (
+            "✅ *Tutorial completato!*\n"
+            "Da ora in poi puoi usare il bot liberamente:\n"
+            "• Invia foto turno → scegli data\n"
+            "• *Cerca* / *Date* per consultare\n"
+            "• *I miei turni* per chiudere con *Risolto*\n\n"
+            "Buon lavoro 👷‍♂️🚄"
+        )
 
 def maybe_send_tutorial_tip(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, new_stage: int) -> None:
     """Avanza lo stage (solo se aumenta) e invia il messaggio guida relativo.
@@ -1495,6 +1503,11 @@ async def miei_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     log_event("miei", user_id=(u.id if u else None), org=(get_approved_org(u.id) if u else None))
     if u:
         await miei_list_dm(ctx, u.id)
+        # Tutorial evoluto: ha aperto "I miei turni"
+        try:
+            maybe_send_tutorial_tip(ctx, u.id, 3)
+        except Exception:
+            pass
 
 # -------------------- Calendar --------------------
 def build_calendar(base_date: datetime, mode="SETDATE") -> InlineKeyboardMarkup:
@@ -1668,6 +1681,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat_id=owner_id, text=f"✅ Turno registrato per il {human}", reply_markup=PRIVATE_KB)
         except Exception:
             pass
+        # Tutorial evoluto: Step 1 completato anche quando salva da calendario
+        try:
+            if owner_id:
+                maybe_send_tutorial_tip(ctx, owner_id, 1)
+        except Exception:
+            pass
         try:
             await query.message.delete()
         except Exception:
@@ -1727,6 +1746,12 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y")
         await query.edit_message_text(f"✅ Turno rimosso ({human}).")
+        # Tutorial evoluto: completato quando chiude almeno un turno
+        try:
+            if owner_id:
+                maybe_send_tutorial_tip(ctx, owner_id, 4)
+        except Exception:
+            pass
         return
 
     # ---- CONTACT ----
