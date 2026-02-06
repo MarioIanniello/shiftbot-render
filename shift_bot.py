@@ -361,285 +361,22 @@ def get_approved_org(user_id: int) -> Optional[str]:
     if status != "approved":
         return None
     return org
-# -------------------- Tutorial helpers --------------------
-TUTORIAL_DONE_STAGE = 4
+# -------------------- Search / Dates / My shifts --------------------
 
-def _now_iso() -> str:
-    return datetime.now(TZ).isoformat(timespec="seconds")
-
-def get_tutorial_state(user_id: int) -> Tuple[int, Optional[str], int]:
-    """Ritorna (stage, last_tutorial_at, reminder_sent). Defaults: (0, None, 0)."""
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT COALESCE(tutorial_stage,0), last_tutorial_at, COALESCE(tutorial_reminder_sent,0) FROM users WHERE user_id=?",
-        (user_id,),
-    )
-    row = cur.fetchone()
-    conn.close()
-    if not row:
-        return (0, None, 0)
-    stage, last_at, rem = row
-    try:
-        stage = int(stage or 0)
-    except Exception:
-        stage = 0
-    try:
-        rem = int(rem or 0)
-    except Exception:
-        rem = 0
-    return (stage, last_at, rem)
-
-def set_tutorial_stage(user_id: int, stage: int) -> None:
-    """Setta lo stage e aggiorna last_tutorial_at. Reset reminder_sent a 0."""
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET tutorial_stage=?, last_tutorial_at=?, tutorial_reminder_sent=0 WHERE user_id=?",
-        (int(stage), _now_iso(), user_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-# Nuovo helper: aggiorna solo last_tutorial_at (senza cambiare stage)
-def touch_tutorial_at(user_id: int) -> None:
-    """Aggiorna solo last_tutorial_at (senza cambiare stage)."""
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET last_tutorial_at=? WHERE user_id=?",
-        (_now_iso(), user_id),
-    )
-    conn.commit()
-    conn.close()
-
-# ----------- NEW: Tutorial reminder helpers -----------
-
-def set_tutorial_reminder_sent(user_id: int, sent: int = 1) -> None:
-    """Imposta tutorial_reminder_sent (0/1) senza cambiare lo stage."""
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET tutorial_reminder_sent=? WHERE user_id=?",
-        (int(sent), user_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-def _hours_since(iso_ts: Optional[str]) -> Optional[float]:
-    if not iso_ts:
-        return None
-    try:
-        dt = datetime.fromisoformat(iso_ts)
-        # se arriva naive, assumiamo TZ Europe/Rome
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=TZ)
-        delta = datetime.now(TZ) - dt
-        return delta.total_seconds() / 3600.0
-    except Exception:
-        return None
-
-
-async def tutorial_reminder_job(ctx: ContextTypes.DEFAULT_TYPE):
-    """Step 4 (tutorial automatico): reminder ai nuovi utenti che non completano i passaggi.
-
-    Regola anti-spam:
-    - Solo utenti approved
-    - Solo se tutorial_stage < 4
-    - Solo se last_tutorial_at è più vecchio di REMINDER_AFTER_H
-    - Solo se tutorial_reminder_sent = 0
-
-    Dopo l'invio, setta tutorial_reminder_sent=1.
-    """
-    REMINDER_AFTER_H = 24  # dopo quante ore mandare il promemoria
-
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT user_id,
-                   COALESCE(tutorial_stage,0) AS stage,
-                   last_tutorial_at,
-                   COALESCE(tutorial_reminder_sent,0) AS rem,
-                   org
-            FROM users
-            WHERE status='approved'
-              AND COALESCE(tutorial_stage,0) < ?
-            """,
-            (TUTORIAL_DONE_STAGE,),
-        )
-        rows = cur.fetchall()
-        conn.close()
-
-        sent_count = 0
-        for user_id, stage, last_at, rem, org in rows:
-            try:
-                stage = int(stage or 0)
-            except Exception:
-                stage = 0
-            try:
-                rem = int(rem or 0)
-            except Exception:
-                rem = 0
-
-            if rem == 1:
-                continue
-
-            hrs = _hours_since(last_at)
-            # se non abbiamo timestamp, non mandiamo reminder (intro gestito altrove)
-            if hrs is None:
-                continue
-
-            if hrs < REMINDER_AFTER_H:
-                continue
-
-            # testo reminder dipende dallo stage corrente
-            tip = _tutorial_text_for_stage(stage)
-            if not tip:
-                continue
-
-            label = ORG_LABELS.get(org, org or "N/D")
-            msg = (
-                "⏰ *Promemoria rapido*\n\n"
-                f"Reparto: *{label}*\n\n"
-                + tip
-            )
-
-            try:
-                await ctx.bot.send_message(
-                    chat_id=int(user_id),
-                    text=msg,
-                    parse_mode="Markdown",
-                    reply_markup=PRIVATE_KB,
-                )
-                set_tutorial_reminder_sent(int(user_id), 1)
-                sent_count += 1
-                log_event("tutorial_reminder_sent", user_id=user_id, org=org, stage=stage, hours_since_last=f"{hrs:.1f}")
-            except Exception:
-                # se non posso scrivere, non bloccare il job
-                log_event("tutorial_reminder_failed", user_id=user_id, org=org, stage=stage)
-                continue
-
-        if sent_count:
-            logger.info(f"[tutorial] reminders sent: {sent_count}")
-    except Exception as e:
-        logger.error(f"[tutorial] reminder job error: {e}")
-
-def _tutorial_text_for_stage(stage: int) -> Optional[str]:
-    # stage 0: appena approvato
-    if stage <= 0:
-        return (
-            "📘 *Tutorial rapido*\n\n"
-            "1️⃣ Invia lo screenshot del turno\n"
-            "2️⃣ Seleziona la data dal calendario\n"
-            "3️⃣ Consulta i turni con *Cerca* o *Date*\n"
-            "4️⃣ Gestisci i tuoi turni con *I miei turni* (e chiudi con *Risolto*)\n\n"
-            "Inizia inviando una foto del turno 👇"
-        )
-
-    # stage 1: primo upload salvato
-    if stage == 1:
-        return (
-            "✅ *Step 1 completato!*\n\n"
-            "Ora prova a consultare i turni:\n"
-            "• Premi *Cerca* e scegli una data\n"
-            "• Oppure premi *Date* per la lista\n"
-        )
-
-    # stage 2: prima consultazione (cerca/date)
-    if stage == 2:
-        return (
-            "✅ *Ottimo!*\n\n"
-            "Ultimo step: premi *I miei turni* per vedere e chiudere i tuoi turni con *Risolto*."
-        )
-
-    # stage 3: ha aperto 'I miei turni'
-    if stage == 3:
-        return (
-            "🎉 *Quasi fatto!*\n\n"
-            "Quando chiudi un turno con *Risolto*, il tutorial si considera completato ✅"
-        )
-
-    # stage 4: completato
-    if stage >= 4:
-        return (
-            "✅ *Tutorial completato!*\n"
-            "Da ora in poi puoi usare il bot liberamente:\n"
-            "• Invia foto turno → scegli data\n"
-            "• *Cerca* / *Date* per consultare\n"
-            "• *I miei turni* per chiudere con *Risolto*\n\n"
-            "Buon lavoro 👷‍♂️🚄"
-        )
-
-def maybe_send_tutorial_tip(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, new_stage: int) -> None:
-    """Avanza lo stage (solo se aumenta) e invia il messaggio guida relativo.
-
-    Nota: lo stage 0 è il messaggio introduttivo. Lo inviamo anche quando lo stage è già 0
-    ma solo la *prima volta* (quando last_tutorial_at è None), così l'utente lo riceve subito dopo l'approvazione.
-    """
-    stage, last_at, _rem = get_tutorial_state(user_id)
-
-    # Non tornare indietro
-    if new_stage < stage:
+# ----------- Tutorial quick command -----------
+async def tutorial_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type != ChatType.PRIVATE:
         return
-
-    # Caso speciale: stage 0 (intro). Se stage è già 0, invia solo se non è mai stato inviato.
-    if new_stage == 0 and stage == 0:
-        if last_at is not None:
-            return
-        # marca che l'intro è stato inviato (senza cambiare stage)
-        try:
-            touch_tutorial_at(user_id)
-        except Exception:
-            pass
-        text = _tutorial_text_for_stage(0)
-        if not text:
-            return
-
-        async def _send_intro():
-            try:
-                await ctx.bot.send_message(
-                    chat_id=user_id,
-                    text=text,
-                    parse_mode="Markdown",
-                    reply_markup=PRIVATE_KB
-                )
-            except Exception:
-                pass
-
-        try:
-            ctx.application.create_task(_send_intro())
-        except Exception:
-            pass
-        return
-
-    # Standard: avanza solo se aumenta
-    if new_stage <= stage:
-        return
-
-    set_tutorial_stage(user_id, new_stage)
-    text = _tutorial_text_for_stage(new_stage)
-    if not text:
-        return
-
-    async def _send():
-        try:
-            await ctx.bot.send_message(
-                chat_id=user_id,
-                text=text,
-                parse_mode="Markdown",
-                reply_markup=PRIVATE_KB
-            )
-        except Exception:
-            pass
-
-    try:
-        ctx.application.create_task(_send())
-    except Exception:
-        pass
+    await update.effective_message.reply_text(
+        "📘 *Guida rapida CambiServizi_bot*\n\n"
+        "1️⃣ Invia screenshot turno → scegli la data\n"
+        "2️⃣ Premi *Cerca* per trovare turni\n"
+        "3️⃣ Premi *Date* per elenco sintetico\n"
+        "4️⃣ Premi *I miei turni* per gestire i tuoi\n\n"
+        "Fine 🙂 Nessun tutorial obbligatorio.",
+        parse_mode="Markdown",
+        reply_markup=PRIVATE_KB
+    )
 
 def count_total_open_shifts() -> int:
     conn = sqlite3.connect(DB_PATH)
@@ -1985,24 +1722,19 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if new_status == "approved":
                 await ctx.bot.send_message(
                     chat_id=target_uid,
-                    text=(f"✅ Approvato!\nReparto: *{ORG_LABELS.get(org, org)}*\n\n"
-                          "Ora puoi caricare turni (invia immagine) e usare i pulsanti 👇"),
+                    text=(
+                        f"✅ Approvato!\nReparto: *{ORG_LABELS.get(org, org)}*\n\n"
+                        "Ora puoi usare il bot.\n\n"
+                        "📌 Funzionamento rapido:\n"
+                        "• Invia screenshot turno → scegli data\n"
+                        "• Cerca turni con *Cerca* o *Date*\n"
+                        "• Gestisci i tuoi con *I miei turni*\n\n"
+                        "Se ti serve di nuovo la guida usa sempre:\n"
+                        "👉 /tutorial"
+                    ),
                     parse_mode="Markdown",
                     reply_markup=PRIVATE_KB
                 )
-                await ctx.bot.send_message(
-                    chat_id=target_uid,
-                    text=(
-                        "📘 *Come funziona il bot*\n\n"
-                        "1️⃣ Invia lo screenshot del turno\n"
-                        "2️⃣ Seleziona la data dal calendario\n"
-                        "3️⃣ Consulta i turni con i pulsanti sotto\n\n"
-                        "Buon utilizzo 👍"
-                    ),
-                    parse_mode="Markdown"
-                )
-                # Tutorial evoluto: invia l'intro (stage 0) subito dopo approvazione
-                maybe_send_tutorial_tip(ctx, target_uid, 0)
             elif new_status == "rejected":
                 await ctx.bot.send_message(
                     chat_id=target_uid,
@@ -2103,6 +1835,7 @@ def main():
     app.add_handler(CommandHandler("start", start), group=1)
     app.add_handler(CommandHandler("help", help_cmd), group=1)          # se ce l'hai
     app.add_handler(CommandHandler("version", version_cmd), group=1)    # se ce l'hai
+    app.add_handler(CommandHandler("tutorial", tutorial_cmd), group=1)
     app.add_handler(CommandHandler("myid", myid_cmd), group=1)
     app.add_handler(CommandHandler("pending", pending_cmd), group=1)    # se esiste davvero
     app.add_handler(CommandHandler("approved", approved_cmd), group=1)
@@ -2159,8 +1892,7 @@ def main():
             # Backup DB: una volta dopo l'avvio + ogni giorno alle 03:30 (ora di Roma)
             jq.run_once(backup_job, when=60)
             jq.run_daily(backup_job, time=datetime.strptime("03:30", "%H:%M").time(), days=(0,1,2,3,4,5,6))
-            # Tutorial reminder: controlla ogni 6 ore e invia promemoria dopo 24h di inattività
-            jq.run_repeating(tutorial_reminder_job, interval=6 * 3600, first=6 * 3600)
+            # Tutorial reminder: (disabilitato)
         except Exception as e:
             print(f"[ShiftBot] Errore JobQueue: {e}")
     else:
