@@ -43,6 +43,7 @@ TZ = zoneinfo.ZoneInfo("Europe/Rome")
 # -------------------- Logging --------------------
 logger = logging.getLogger("shiftbot")
 logger.setLevel(logging.INFO)
+logger.propagate = False
 
 # evita duplicazione handler (reload / restart Render)
 if not logger.handlers:
@@ -145,15 +146,21 @@ def make_db_backup(reason: str = "scheduled") -> Optional[str]:
         dst = os.path.join(BACKUP_DIR, f"shiftbot_{ts}.sqlite3")
 
         if not os.path.exists(DB_PATH):
-            logger.warning(f"[backup] DB non trovato, salto backup (DB_PATH={DB_PATH})")
+            msg = f"[backup] DB non trovato, salto backup (DB_PATH={DB_PATH})"
+            logger.warning(msg)
+            print(msg, flush=True)
             return None
 
         shutil.copy2(DB_PATH, dst)
         _rotate_backups(BACKUP_DIR, BACKUP_KEEP)
-        logger.info(f"[backup] OK ({reason}) -> {dst}")
+        msg = f"[backup] OK ({reason}) -> {dst}"
+        logger.info(msg)
+        print(msg, flush=True)
         return dst
     except Exception as e:
-        logger.error(f"[backup] ERRORE ({reason}): {e}")
+        msg = f"[backup] ERRORE ({reason}): {e}"
+        logger.error(msg)
+        print(msg, flush=True)
         return None
 
 async def backup_job(ctx: ContextTypes.DEFAULT_TYPE):
