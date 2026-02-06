@@ -431,17 +431,18 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not u:
         return
 
-    username = f"@{u.username}" if u.username else ""
-    full_name = u.full_name or "utente"
-    log_event("start", user_id=u.id, username=username, full_name=full_name, payload=(payload or ""))
-    upsert_user(u.id, username, full_name, org=None, status=None)
+   username = f"@{u.username}" if u.username else ""
+full_name = u.full_name or "utente"
 
-    # Se /start <CODICE>
-    payload = None
-    if update.message and update.message.text:
-        parts = update.message.text.split(maxsplit=1)
-        if len(parts) > 1:
-            payload = parts[1].strip().upper()
+# Se /start <CODICE>
+payload = None
+if update.message and update.message.text:
+    parts = update.message.text.split(maxsplit=1)
+    if len(parts) > 1:
+        payload = parts[1].strip().upper()
+
+log_event("start", user_id=u.id, username=username, full_name=full_name, payload=(payload or ""))
+upsert_user(u.id, username, full_name, org=None, status=None)
 
     if payload and payload in ORG_LABELS:
         # Se l'utente è nella lista admin del reparto, auto-approva (bootstrap)
@@ -449,7 +450,11 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         upsert_user(u.id, username, full_name, org=payload, status=desired_status)
         log_event("auth_request", user_id=u.id, org=payload, status=desired_status)
-
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        logger.exception("Unhandled exception", exc_info=ctx.error)
+    except Exception:
+        pass
         if desired_status == "approved":
             await update.effective_message.reply_text(
                 f"✅ Accesso attivo (admin).\nReparto: *{ORG_LABELS[payload]}*\n\n"
