@@ -376,10 +376,13 @@ async def tutorial_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "📘 Guida rapida CambiServizi_bot\n\n"
-        "1️⃣ Invia screenshot turno📎 → Scrivi cosa vorresti in cambio ⌨️ → scegli la data 🗓️\n\n"
-        "2️⃣ Premi Cerca per trovare turni in una data specifica\n\n"
-        "3️⃣ Premi Date per elenco sintetico\n\n"
-        "4️⃣ Premi I miei turni per gestire i tuoi. Clicca su Risolto ✅ se il cambio è stato effettuato.\n\n"
+        "1️⃣ Invia screenshot turno📎\n\n"
+        "Scrivi cosa vorresti in cambio ⌨️\n\n"
+        "Scegli la data 🗓️\n\n"
+        "2️⃣ Premi Cerca per trovare turni in una data specifica.\n\n"
+        "3️⃣ Premi Date per elenco sintetico.\n\n"
+        "4️⃣ Premi I miei turni per gestire i tuoi.\n"
+        "Clicca su Risolto ✅ se il cambio è stato effettuato.\n\n"
         "Fine 🙂"
     )
 
@@ -538,7 +541,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             await update.effective_message.reply_text(
                 "📘 *Mini‑tutorial rapido*\n\n"
-                "• Invia una foto del turno → scegli la data\n"
+                "• Invia una foto del turno → Scegli la data\n"
                 "• Usa *Cerca* per vedere turni disponibili\n"
                 "• Usa *Date* per elenco sintetico\n"
                 "• Usa *I miei turni* per gestire i tuoi\n\n"
