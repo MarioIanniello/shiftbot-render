@@ -451,9 +451,9 @@ async def commands_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "• /revoke — revoca autorizzazione (del tuo reparto)\n"
         "• /backupnow — crea backup su disco\n"
         "• /backupsend — crea e invia backup in chat\n"
+        "• /stats [1|7|30] — statistiche utilizzo bot\n"
         "• /logs [N] — ultime righe log (max 2000)\n"
         "• /commands — questa lista\n\n"
-        "ℹ️ Il comando /admin2507 resta interno."
     )
 
     await update.effective_message.reply_text(text)
