@@ -458,6 +458,126 @@ async def commands_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.effective_message.reply_text(text)
 
+
+# -------------------- /stats (solo admin, tutte org) --------------------
+async def stats_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Statistiche utilizzo (solo admin). Uso: /stats [1|7|30]"""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    u = update.effective_user
+    if not u:
+        return
+
+    row = get_user_row(u.id)
+    if not row:
+        await update.effective_message.reply_text("Non sei registrato. Usa /start.")
+        return
+
+    _uid, _org, status = row
+    all_admins = _all_admin_ids()
+    if status != "approved" or u.id not in all_admins:
+        await update.effective_message.reply_text("⛔ Solo gli admin possono usare /stats.")
+        return
+
+    days = 1
+    if ctx.args:
+        try:
+            days = int(ctx.args[0])
+        except Exception:
+            days = 1
+
+    if days not in (1, 7, 30):
+        await update.effective_message.reply_text("Uso: /stats 1 oppure /stats 7 oppure /stats 30")
+        return
+
+    if not os.path.exists(LOG_PATH):
+        await update.effective_message.reply_text("❌ File di log non trovato.")
+        return
+
+    cutoff = datetime.now(TZ) - timedelta(days=days)
+
+    # pattern: [2026-02-06 23:40:59,367] INFO event=tutorial user_id=...
+    ts_re = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+\]\s+\w+\s+(.*)$")
+
+    event_counts: Dict[str, int] = {}
+    org_counts: Dict[str, int] = {}
+    user_ids: set[int] = set()
+    total = 0
+
+    try:
+        with open(LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if "event=" not in line:
+                    continue
+                m = ts_re.match(line.rstrip("\n"))
+                if not m:
+                    continue
+                try:
+                    ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    ts = ts.replace(tzinfo=TZ)
+                except Exception:
+                    continue
+                if ts < cutoff:
+                    continue
+
+                rest = m.group(2)
+                # extract key=value pairs
+                kv = {}
+                for part in rest.split():
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        kv[k.strip()] = v.strip()
+
+                ev = kv.get("event")
+                if not ev:
+                    continue
+
+                total += 1
+                event_counts[ev] = event_counts.get(ev, 0) + 1
+
+                orgv = kv.get("org", "").strip()
+                if orgv:
+                    org_counts[orgv] = org_counts.get(orgv, 0) + 1
+
+                uidv = kv.get("user_id")
+                if uidv:
+                    try:
+                        user_ids.add(int(uidv))
+                    except Exception:
+                        pass
+
+    except Exception as e:
+        logger.error(f"[stats] ERROR: {e}")
+        await update.effective_message.reply_text("❌ Errore durante la lettura del log.")
+        return
+
+    if total == 0:
+        await update.effective_message.reply_text(f"📈 Statistiche utilizzo (ultimi {days} giorni)\n\nNessun evento registrato nel periodo.")
+        return
+
+    lines = [
+        f"📈 Statistiche utilizzo (ultimi {days} giorni)",
+        "",
+        f"Eventi totali: {total}",
+        f"Utenti unici: {len(user_ids)}",
+        "",
+        "Top eventi:",
+    ]
+
+    for ev, cnt in sorted(event_counts.items(), key=lambda x: x[1], reverse=True)[:10]:
+        lines.append(f"• {ev}: {cnt}")
+
+    if org_counts:
+        lines.append("")
+        lines.append("Top reparti:")
+        for orgv, cnt in sorted(org_counts.items(), key=lambda x: x[1], reverse=True)[:10]:
+            label = ORG_LABELS.get(orgv, orgv)
+            lines.append(f"• {label} ({orgv}): {cnt}")
+
+    await update.effective_message.reply_text("\n".join(lines))
+    log_event("stats", admin_id=u.id, days=days, total=total)
+
 def count_total_open_shifts() -> int:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -1939,6 +2059,7 @@ def main():
     app.add_handler(CommandHandler("approvedpdbfrna", approvedpdbfrna_cmd), group=1)
     app.add_handler(CommandHandler("admin2507", admin_cmd), group=1)
     app.add_handler(CommandHandler("logs", logs_cmd), group=1)
+    app.add_handler(CommandHandler("stats", stats_cmd), group=1)
     app.add_handler(CommandHandler("revoke", revoke_cmd), group=1)
     app.add_handler(CommandHandler("cerca", search_cmd), group=1)
     app.add_handler(CommandHandler("date", dates_cmd), group=1)
