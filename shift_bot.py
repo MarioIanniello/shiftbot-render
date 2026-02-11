@@ -2064,11 +2064,19 @@ async def block_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Risponde ai testi non riconosciuti in privato, senza interferire con i comandi."""
     if update.effective_chat.type != ChatType.PRIVATE:
         return
+
+    # Se manca username, blocca e spiega come impostarlo
+    if not await require_username(update):
+        raise ApplicationHandlerStop
     await update.effective_message.reply_text("Usa i pulsanti 👇", reply_markup=PRIVATE_KB)
 
 async def private_text_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != ChatType.PRIVATE:
         return
+
+    # Username obbligatorio anche per testi normali
+    if not await require_username(update):
+        raise ApplicationHandlerStop
 
     text = (update.effective_message.text or "").strip()
 
