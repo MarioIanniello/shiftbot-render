@@ -1442,7 +1442,29 @@ async def show_shifts(update: Update, ctx: ContextTypes.DEFAULT_TYPE, date_iso: 
     )
 
     for (sid, chat_id, message_id, _user_id, _username, _caption, file_id) in rows:
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{sid}")]])
+        # Pulsante diretto: apre subito la chat dell'autore (se ha username)
+        handle = None
+        if _username and isinstance(_username, str) and _username.startswith("@") and len(_username) > 1:
+            handle = _username[1:]
+
+        # Fallback: prova a leggere username aggiornato dalla tabella users (per turni legacy)
+        if not handle and _user_id:
+            try:
+                conn2 = sqlite3.connect(DB_PATH)
+                cur2 = conn2.cursor()
+                cur2.execute("SELECT username FROM users WHERE user_id=?", (_user_id,))
+                r2 = cur2.fetchone()
+                conn2.close()
+                if r2 and r2[0] and isinstance(r2[0], str) and r2[0].startswith("@") and len(r2[0]) > 1:
+                    handle = r2[0][1:]
+            except Exception:
+                handle = None
+
+        if handle:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("📩 Contatta autore", url=f"https://t.me/{handle}")]])
+        else:
+            # Se non c'è username, mantieni il vecchio callback per mostrare il messaggio di avviso
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("📩 Contatta autore", callback_data=f"CONTACT|{sid}")]])
         sent_mid = None
         try:
             copied = await ctx.bot.copy_message(chat_id=update.effective_chat.id,
