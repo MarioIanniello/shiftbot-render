@@ -643,6 +643,31 @@ async def save_shift(msg: Message, date_iso: str) -> int:
         file_id=file_id
     )
 
+# -------------------- Username requirement helper --------------------
+async def require_username(update: Update) -> bool:
+    """Blocca l'uso del bot se l'utente non ha un username Telegram.
+
+    Serve per permettere il contatto diretto tra colleghi (link t.me).
+    """
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return False
+
+    u = update.effective_user
+    if not u:
+        return False
+
+    if not u.username:
+        await update.effective_message.reply_text(
+            "⚠️ Per usare CambiServizi_bot devi avere un *username* Telegram.\n\n"
+            "Serve per permettere ai colleghi di contattarti direttamente quando trovano un turno compatibile.\n\n"
+            "👉 Vai su Telegram: *Impostazioni → Username* → scegline uno.\n\n"
+            "Appena fatto, torna qui e scrivi /start 🙂",
+            parse_mode="Markdown"
+        )
+        return False
+
+    return True
+
 # -------------------- Auth gate --------------------
 async def require_approved(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
     """True se l’utente è approved, altrimenti spiega e blocca."""
@@ -650,6 +675,8 @@ async def require_approved(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bo
         return False
     u = update.effective_user
     if not u:
+        return False
+    if not await require_username(update):
         return False
     row = get_user_row(u.id)
     if not row:
@@ -672,6 +699,9 @@ async def require_approved(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bo
 # -------------------- Commands --------------------
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    if not await require_username(update):
         return
 
     u = update.effective_user
@@ -772,6 +802,10 @@ async def myid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🆔 user_id: `{u.id}`\n👤 username: {uname}",
         parse_mode="Markdown"
     )
+    if not u.username:
+        await update.effective_message.reply_text(
+            "⚠️ Per usare CambiServizi_bot in modo completo (contatto diretto) devi impostare un username.\n"
+            "Vai su Telegram: Impostazioni → Username.")
 
 async def pending_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != ChatType.PRIVATE:
@@ -1833,49 +1867,41 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.answer("Turno non visibile per il tuo reparto.", show_alert=True)
             return
 
-        requester_name = mention_html(
-            requester.id if requester else None,
-            f"@{requester.username}" if requester and requester.username else None
-        )
+        # Contatto diretto: forniamo username dell'autore + link t.me
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y") if date_iso else ""
 
-        # Telegram non consente "aprire chat tra utenti". Qui facciamo DM all’autore + bottone profilo richiedente.
-        try:
-            kb = None
-            if requester and requester.username:
-                kb = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("👤 Apri profilo richiedente", url=f"https://t.me/{requester.username}")]]
-                )
-            text_html = (
-                f"📩 Richiesta cambio per il turno del <b>{human}</b>\n\n"
-                f"Richiedente: {requester_name}\n\n"
-                f"<b>Messaggio suggerito:</b>\n"
-                f"Ciao, questo turno è ancora disponibile?"
-            )
-            await ctx.bot.send_message(
-                chat_id=owner_id,
-                text=text_html,
-                parse_mode="HTML",
-                reply_markup=kb
-            )
-            await query.message.reply_text("📬 Ho avvisato l’autore in privato.")
-            log_event("contact_dm_sent", requester_id=(requester.id if requester else None), owner_id=owner_id, shift_id=shift_id)
-        except Forbidden:
-            # se l’autore non ha mai aperto il bot, non possiamo scrivergli
-            log_event("contact_dm_forbidden", requester_id=(requester.id if requester else None), owner_id=owner_id, shift_id=shift_id)
-            btns = None
-            if owner_username and isinstance(owner_username, str) and owner_username.startswith("@"):
-                handle = owner_username[1:]
-                btns = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("👤 Apri profilo autore", url=f"https://t.me/{handle}")]]
-                )
+        # owner_username può essere "@handle" oppure nome completo (legacy). Accettiamo solo @handle.
+        handle = None
+        if owner_username and isinstance(owner_username, str) and owner_username.startswith("@") and len(owner_username) > 1:
+            handle = owner_username[1:]
+
+        if not handle:
+            # fallback: prova a leggere username aggiornato dalla tabella users
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                cur = conn.cursor()
+                cur.execute("SELECT username FROM users WHERE user_id=?", (owner_id,))
+                r2 = cur.fetchone()
+                conn.close()
+                if r2 and r2[0] and isinstance(r2[0], str) and r2[0].startswith("@") and len(r2[0]) > 1:
+                    handle = r2[0][1:]
+            except Exception:
+                handle = None
+
+        if not handle:
             await query.message.reply_text(
-                "⚠️ Non posso scrivere all’autore perché non ha avviato il bot.\n"
-                "Contattalo direttamente dal profilo:",
-                reply_markup=btns
+                "⚠️ Non posso fornirti un contatto diretto perché l’autore non ha un username Telegram impostato.\n\n"
+                "Suggerimento: chiedi all’autore di impostare uno username (Impostazioni → Username)."
             )
-        except Exception:
-            await query.answer("Errore durante il contatto.", show_alert=True)
+            log_event("contact_no_username", requester_id=(requester.id if requester else None), owner_id=owner_id, shift_id=shift_id)
+            return
+
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("👤 Apri profilo autore", url=f"https://t.me/{handle}")]])
+        await query.message.reply_text(
+            f"👤 Autore turno ({human}): @{handle}\n\nScrivigli direttamente su Telegram.",
+            reply_markup=kb
+        )
+        log_event("contact_direct", requester_id=(requester.id if requester else None), owner_id=owner_id, shift_id=shift_id, owner_handle=handle)
         return
 
     # ---- APPROVE / REJECT / REVOKE ----
