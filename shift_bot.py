@@ -99,7 +99,7 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # -------------------- Username gate (global) --------------------
 USERNAME_REQUIRED_TEXT = (
     "⚠️ Per usare CambiServizi_bot devi impostare un username Telegram.\n\n"
-    "Serve per permettere ai colleghi di contattarti direttamente (link t.me) e per usare correttamente i pulsanti e i comandi.\n\n"
+    "Serve per permettere ai colleghi di contattarti direttamente e per usare correttamente i pulsanti e i comandi.\n\n"
     "✅ Come si imposta:\n"
     "1) Apri Telegram\n"
     "2) Vai su Impostazioni\n"
@@ -733,7 +733,7 @@ async def save_shift(msg: Message, date_iso: str) -> int:
 async def require_username(update: Update) -> bool:
     """Blocca l'uso del bot se l'utente non ha un username Telegram.
 
-    Serve per permettere il contatto diretto tra colleghi (link t.me).
+    Serve per permettere il contatto diretto tra colleghi.
     Valido in qualsiasi chat (privato o gruppo).
     """
     u = update.effective_user
@@ -1975,7 +1975,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.answer("Turno non visibile per il tuo reparto.", show_alert=True)
             return
 
-        # Contatto diretto: forniamo username dell'autore + link t.me
+        # Contatto diretto: forniamo username dell'autore 
         human = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d/%m/%Y") if date_iso else ""
 
         # owner_username può essere "@handle" oppure nome completo (legacy). Accettiamo solo @handle.
