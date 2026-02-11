@@ -95,6 +95,61 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             pass
     except Exception:
         pass
+
+# -------------------- Username gate (global) --------------------
+USERNAME_REQUIRED_TEXT = (
+    "⚠️ Per usare CambiServizi_bot devi impostare un *username* Telegram.\n\n"
+    "Serve per permettere ai colleghi di contattarti direttamente (link t.me) e per usare correttamente i pulsanti e i comandi.\n\n"
+    "✅ Come si imposta:\n"
+    "1) Apri Telegram\n"
+    "2) Vai su *Impostazioni*\n"
+    "3) Tocca *Username*\n"
+    "4) Scegline uno (senza spazi) e salva\n\n"
+    "Poi torna qui e scrivi /start 🙂"
+)
+
+async def _reply_username_required(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Risposta standard quando manca l'username."""
+    try:
+        await update.effective_message.reply_text(USERNAME_REQUIRED_TEXT, parse_mode="Markdown")
+    except Exception:
+        try:
+            await ctx.bot.send_message(chat_id=update.effective_chat.id, text=USERNAME_REQUIRED_TEXT, parse_mode="Markdown")
+        except Exception:
+            pass
+
+async def _gate_username_for_commands(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Intercetta QUALSIASI comando da utenti senza username e spiega cosa fare."""
+    u = update.effective_user
+    if not u:
+        return
+    if u.username:
+        return
+    await _reply_username_required(update, ctx)
+    raise ApplicationHandlerStop
+
+async def _gate_username_for_callbacks(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
+    """True se OK; False se manca username (risponde e blocca)."""
+    query = update.callback_query
+    u = query.from_user if query else None
+    if not u:
+        return True
+    if u.username:
+        return True
+
+    # Alert immediato + messaggio chiaro in chat
+    try:
+        await query.answer("Devi impostare un username Telegram (Impostazioni → Username).", show_alert=True)
+    except Exception:
+        pass
+
+    try:
+        # In DM o gruppo, lascia anche istruzioni complete
+        await query.message.reply_text(USERNAME_REQUIRED_TEXT, parse_mode="Markdown")
+    except Exception:
+        pass
+
+    return False
 def _all_admin_ids() -> set[int]:
     try:
         return set().union(*ORG_ADMINS.values()) if ORG_ADMINS else set()
@@ -658,10 +713,7 @@ async def require_username(update: Update) -> bool:
 
     if not u.username:
         await update.effective_message.reply_text(
-            "⚠️ Per usare CambiServizi_bot devi avere un *username* Telegram.\n\n"
-            "Serve per permettere ai colleghi di contattarti direttamente quando trovano un turno compatibile.\n\n"
-            "👉 Vai su Telegram: *Impostazioni → Username* → scegline uno.\n\n"
-            "Appena fatto, torna qui e scrivi /start 🙂",
+            USERNAME_REQUIRED_TEXT,
             parse_mode="Markdown"
         )
         return False
@@ -1724,6 +1776,10 @@ def mention_html(user_id: Optional[int], username: Optional[str]) -> str:
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    # Username gate: se manca username, blocca qualsiasi pulsante/callback
+    ok_user = await _gate_username_for_callbacks(update, ctx)
+    if not ok_user:
+        return
     parts = (query.data or "").split("|")
 
     # ---- NAV ----
@@ -2084,6 +2140,13 @@ def main():
         app = ApplicationBuilder().token(TOKEN).defaults(defaults).build()
     except Exception:
         app = ApplicationBuilder().token(TOKEN).build()
+
+    # -------------------- Global username gate (ANY /command) --------------------
+    # Se l'utente non ha username, qualunque comando deve rispondere con istruzioni chiare.
+    app.add_handler(
+        MessageHandler(filters.COMMAND, _gate_username_for_commands),
+        group=0
+    )
 
     # -------------------- Comandi (DM) --------------------
     app.add_handler(CommandHandler("start", start), group=1)
