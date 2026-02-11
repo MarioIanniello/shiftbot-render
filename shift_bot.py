@@ -1918,9 +1918,9 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             log_event("contact_no_username", requester_id=(requester.id if requester else None), owner_id=owner_id, shift_id=shift_id)
             return
 
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("👤 Apri profilo autore", url=f"https://t.me/{handle}")]])
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📩 Contatta autore", url=f"https://t.me/{handle}")]])
         await query.message.reply_text(
-            f"👤 Autore turno ({human}): @{handle}\n\nScrivigli direttamente su Telegram.",
+            f"👤 Autore turno ({human}): @{handle}",
             reply_markup=kb
         )
         log_event("contact_direct", requester_id=(requester.id if requester else None), owner_id=owner_id, shift_id=shift_id, owner_handle=handle)
