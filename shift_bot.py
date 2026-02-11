@@ -98,12 +98,12 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 # -------------------- Username gate (global) --------------------
 USERNAME_REQUIRED_TEXT = (
-    "⚠️ Per usare CambiServizi_bot devi impostare un *username* Telegram.\n\n"
+    "⚠️ Per usare CambiServizi_bot devi impostare un username Telegram.\n\n"
     "Serve per permettere ai colleghi di contattarti direttamente (link t.me) e per usare correttamente i pulsanti e i comandi.\n\n"
     "✅ Come si imposta:\n"
     "1) Apri Telegram\n"
-    "2) Vai su *Impostazioni*\n"
-    "3) Tocca *Username*\n"
+    "2) Vai su Impostazioni\n"
+    "3) Tocca Username\n"
     "4) Scegline uno (senza spazi) e salva\n\n"
     "Poi torna qui e scrivi /start 🙂"
 )
@@ -111,10 +111,10 @@ USERNAME_REQUIRED_TEXT = (
 async def _reply_username_required(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Risposta standard quando manca l'username."""
     try:
-        await update.effective_message.reply_text(USERNAME_REQUIRED_TEXT, parse_mode="Markdown")
+        await update.effective_message.reply_text(USERNAME_REQUIRED_TEXT)
     except Exception:
         try:
-            await ctx.bot.send_message(chat_id=update.effective_chat.id, text=USERNAME_REQUIRED_TEXT, parse_mode="Markdown")
+            await ctx.bot.send_message(chat_id=update.effective_chat.id, text=USERNAME_REQUIRED_TEXT)
         except Exception:
             pass
 
@@ -176,7 +176,7 @@ async def _gate_username_for_callbacks(update: Update, ctx: ContextTypes.DEFAULT
 
     # In DM o gruppo, lascia anche istruzioni complete
     try:
-        await query.message.reply_text(USERNAME_REQUIRED_TEXT, parse_mode="Markdown")
+        await query.message.reply_text(USERNAME_REQUIRED_TEXT)
     except Exception:
         pass
 
@@ -743,8 +743,7 @@ async def require_username(update: Update) -> bool:
     if not u.username:
         try:
             await update.effective_message.reply_text(
-                USERNAME_REQUIRED_TEXT,
-                parse_mode="Markdown"
+                USERNAME_REQUIRED_TEXT
             )
         except Exception:
             pass
