@@ -128,23 +128,54 @@ async def _gate_username_for_commands(update: Update, ctx: ContextTypes.DEFAULT_
     await _reply_username_required(update, ctx)
     raise ApplicationHandlerStop
 
-async def _gate_username_for_callbacks(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
-    """True se OK; False se manca username (risponde e blocca)."""
-    query = update.callback_query
-    u = query.from_user if query else None
+# -------------------- Username gate for ANY text (non-command) --------------------
+async def _gate_username_for_texts(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Intercetta QUALSIASI messaggio di testo (non-comando) da utenti senza username e spiega cosa fare."""
+    u = update.effective_user
     if not u:
-        return True
+        return
     if u.username:
+        return
+    await _reply_username_required(update, ctx)
+    raise ApplicationHandlerStop
+
+async def _gate_username_for_callbacks(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
+    """True se OK; False se manca username (risponde e blocca).
+
+    SEMPRE 'parlante': risponde sempre alla callback (query.answer) così il client non resta in loading.
+    """
+    query = update.callback_query
+    if not query:
         return True
 
-    # Alert immediato + messaggio chiaro in chat
+    u = query.from_user
+    if not u:
+        # chiudi comunque lo spinner
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        return True
+
+    # OK: username presente -> chiudi lo spinner sempre
+    if u.username:
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        return True
+
+    # KO: manca username -> alert + istruzioni complete
     try:
-        await query.answer("Devi impostare un username Telegram (Impostazioni → Username).", show_alert=True)
+        await query.answer(
+            "Devi impostare un username Telegram (Impostazioni → Username).",
+            show_alert=True
+        )
     except Exception:
         pass
 
+    # In DM o gruppo, lascia anche istruzioni complete
     try:
-        # In DM o gruppo, lascia anche istruzioni complete
         await query.message.reply_text(USERNAME_REQUIRED_TEXT, parse_mode="Markdown")
     except Exception:
         pass
@@ -703,19 +734,20 @@ async def require_username(update: Update) -> bool:
     """Blocca l'uso del bot se l'utente non ha un username Telegram.
 
     Serve per permettere il contatto diretto tra colleghi (link t.me).
+    Valido in qualsiasi chat (privato o gruppo).
     """
-    if update.effective_chat.type != ChatType.PRIVATE:
-        return False
-
     u = update.effective_user
     if not u:
         return False
 
     if not u.username:
-        await update.effective_message.reply_text(
-            USERNAME_REQUIRED_TEXT,
-            parse_mode="Markdown"
-        )
+        try:
+            await update.effective_message.reply_text(
+                USERNAME_REQUIRED_TEXT,
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
         return False
 
     return True
@@ -1775,7 +1807,6 @@ def mention_html(user_id: Optional[int], username: Optional[str]) -> str:
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     # Username gate: se manca username, blocca qualsiasi pulsante/callback
     ok_user = await _gate_username_for_callbacks(update, ctx)
     if not ok_user:
@@ -2153,6 +2184,13 @@ def main():
     # Se l'utente non ha username, qualunque comando deve rispondere con istruzioni chiare.
     app.add_handler(
         MessageHandler(filters.COMMAND, _gate_username_for_commands),
+        group=0
+    )
+
+    # -------------------- Global username gate (ANY text, non-command) --------------------
+    # Se l'utente non ha username, qualunque messaggio di testo (anche non-comando) deve rispondere con istruzioni chiare.
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, _gate_username_for_texts),
         group=0
     )
 
